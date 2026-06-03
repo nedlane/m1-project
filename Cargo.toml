@@ -1,0 +1,21 @@
+[package]
+name = "m1-project"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "Structured, validated editor for MoTeC M1 Project.m1prj files (create channels, set permissions/unit/type, set script call rate)"
+
+[[bin]]
+name = "m1-project"
+path = "src/main.rs"
+
+[lib]
+name = "m1_project"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+roxmltree = "0.21"
+
+[profile.release]
+opt-level = 3

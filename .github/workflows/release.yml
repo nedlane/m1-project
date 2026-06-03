@@ -1,0 +1,116 @@
+name: Release binaries
+
+# Publishes the m1-project CLI as prebuilt binaries (Linux/macOS/Windows) on a
+# GitHub Release named after the crate version. m1-ci downloads these to run the
+# M1 toolchain without building from source. A release is cut automatically
+# whenever the Cargo.toml version changes (i.e. no release tag exists for it
+# yet); can also be run manually.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      should_release: ${{ steps.v.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: v
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Release when the tag is absent OR the existing release is missing any
+          # of the per-platform binaries. Keying only on "release exists" meant a
+          # release tagged before its binaries uploaded (or created by hand) could
+          # never self-heal — the consumers would be left with a 404.
+          required="m1-project-x86_64-unknown-linux-gnu m1-project-aarch64-apple-darwin m1-project-x86_64-pc-windows-msvc.exe"
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            assets=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
+            missing=
+            for a in $required; do
+              grep -qxF "$a" <<<"$assets" || missing="$missing $a"
+            done
+            if [ -n "$missing" ]; then
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+              echo "Release v$VERSION exists but is missing binaries:$missing — will (re)build and upload."
+            else
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              echo "Release v$VERSION already has all binaries — nothing to do."
+            fi
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "Will release v$VERSION."
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+          - os: macos-14
+            target: aarch64-apple-darwin
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+          # Intel macOS (x86_64-apple-darwin) is intentionally omitted: GitHub no
+          # longer reliably allocates Intel-Mac runners, which stalls the release.
+          # Intel-Mac users build from source.
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} --bin m1-project
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "target/${{ matrix.target }}/release/m1-project${{ matrix.ext }}" \
+             "out/m1-project-${{ matrix.target }}${{ matrix.ext }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin-${{ matrix.target }}
+          path: out/*
+
+  release:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: out
+          merge-multiple: true
+      - name: Publish release v${{ needs.check.outputs.version }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.check.outputs.version }}
+        run: |
+          # Create the release if absent, otherwise upload the binaries to the
+          # existing one (--clobber overwrites any partial uploads). This repairs
+          # a release that exists but is missing its binaries.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" out/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "m1-project $TAG" \
+              --notes "Prebuilt m1-project CLI binaries (Linux/macOS/Windows). Consumed by the m1-vscode extension and the nvim-m1 plugin so end users do not build from source."
+          fi
