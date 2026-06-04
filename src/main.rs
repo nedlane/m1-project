@@ -103,7 +103,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     use Command::*;
     // list-rates is read-only; handle it before the read/edit/write flow.
     if let ListRates { project } = &cli.command {
-        let xml = std::fs::read_to_string(project)?;
+        // Decode tolerantly: MoTeC writes Windows-1252 for non-ASCII bytes
+        // (e.g. `°`), which `read_to_string` would reject as invalid UTF-8.
+        let (xml, _enc) = m1_workspace::read_text_with_encoding(project)?;
         for r in m1_project::available_rates(&xml)? {
             println!("{r}");
         }
@@ -118,7 +120,10 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         | SetCallRate { project, .. } => project,
         ListRates { .. } => unreachable!(),
     };
-    let xml = std::fs::read_to_string(project)?;
+    // Decode tolerantly and remember the source encoding so the write-back
+    // re-encodes in the same encoding (don't transcode a Windows-1252 file to
+    // UTF-8 behind MoTeC's back).
+    let (xml, encoding) = m1_workspace::read_text_with_encoding(project)?;
 
     let out = match &cli.command {
         CreateChannel {
@@ -152,7 +157,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.dry_run || cli.stdout {
         print!("{out}");
     } else {
-        std::fs::write(project, out)?;
+        // Re-encode in the file's original encoding so a Windows-1252 `°`
+        // stays a single 0xB0 byte rather than UTF-8 `0xC2 0xB0`.
+        std::fs::write(project, m1_workspace::encode(&out, encoding))?;
         eprintln!("Updated {}", project.display());
     }
     Ok(())
