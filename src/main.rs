@@ -157,10 +157,61 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.dry_run || cli.stdout {
         print!("{out}");
     } else {
-        // Re-encode in the file's original encoding so a Windows-1252 `°`
-        // stays a single 0xB0 byte rather than UTF-8 `0xC2 0xB0`.
-        std::fs::write(project, m1_workspace::encode(&out, encoding))?;
+        // Defense in depth: never write XML that isn't well-formed. The surgical
+        // edits are parser-located and validated by tests, but re-parsing the
+        // result before the irreversible write guarantees a bug can never persist
+        // corruption to the canonical project file (#5).
+        if let Err(e) = roxmltree::Document::parse(&out) {
+            return Err(format!(
+                "refusing to write malformed XML to {}: {e}",
+                project.display()
+            )
+            .into());
+        }
+        // Re-encode in the file's original encoding so a Windows-1252 `°` stays a
+        // single 0xB0 byte rather than UTF-8 `0xC2 0xB0`. `encode_checked` refuses
+        // (rather than silently writing `?`) when the new content needs a
+        // character Windows-1252 cannot represent, e.g. an ohm `Ω` (m1-workspace#6).
+        let bytes = m1_workspace::encode_checked(&out, encoding)
+            .map_err(|e| format!("cannot save in the file's {encoding:?} encoding: {e}"))?;
+        // Atomic write: a temp file in the same directory, fsync'd, then renamed
+        // over the target — an interruption/panic/ENOSPC can no longer truncate
+        // the irreplaceable project file mid-write (#6).
+        write_atomic(project, &bytes)?;
         eprintln!("Updated {}", project.display());
+    }
+    Ok(())
+}
+
+/// Write `bytes` to `path` atomically: write a sibling temp file, `fsync` it,
+/// then `rename` it over `path` (atomic on the same filesystem). Avoids the
+/// `O_TRUNC`-then-write window that could leave the project file empty/partial.
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Project.m1prj");
+    // Same directory (so rename is atomic), hidden, and pid-tagged to avoid
+    // colliding with a concurrent run.
+    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let write_result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
     Ok(())
 }
