@@ -112,7 +112,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "m1-project"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "clap",
  "m1-workspace",
@@ -121,8 +121,8 @@ dependencies = [
 
 [[package]]
 name = "m1-workspace"
-version = "0.2.0"
-source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.2.0#4e5d55fdd0d950b1a79d673418f21ccf00c2e6fb"
+version = "0.3.0"
+source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.3.0#35080eb011f35e0d967fdaaf9d9f2996d0a6d6c9"
 
 [[package]]
 name = "memchr"

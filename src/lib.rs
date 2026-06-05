@@ -132,8 +132,15 @@ pub fn create_channel(
     {
         let doc = roxmltree::Document::parse(xml).map_err(|e| EditError::Xml(e.to_string()))?;
         for n in doc.descendants().filter(|n| n.has_tag_name("Component")) {
+            // Anchor on the last *direct* child of `parent` — one whose Name is
+            // exactly one segment deeper. `starts_with(&prefix)` alone also
+            // matches a grandchild like `Root.Engine.Sub.Deep`, which would drop
+            // the new sibling after a sub-group's components — and, in nested
+            // layouts, after the parent group's closing tags, outside it (#8).
             if let Some(nm) = n.attribute("Name")
-                && nm.starts_with(&prefix)
+                && let Some(rest) = nm.strip_prefix(&prefix)
+                && !rest.is_empty()
+                && !rest.contains('.')
                 && n.range().end > anchor_end
             {
                 anchor_end = n.range().end;
@@ -198,15 +205,20 @@ pub fn set_type(xml: &str, component: &str, ty: &str) -> Result<String, EditErro
 pub fn set_unit(xml: &str, component: &str, unit: &str) -> Result<String, EditError> {
     // Ensure a <Props> exists, then set the Locale/Default unit inside it.
     let xml = ensure_props(xml, component)?;
+
+    // Replace the value of the *real* display unit — the `Unit` attribute on the
+    // `<Default>` element — located via the XML parser. A plain text scan of the
+    // whole <Props> subtree would also match a `Unit="…"` in a comment or an
+    // unrelated child element and mutate that instead, silently (#7).
+    if let Some(u_range) = default_unit_value_range(&xml, component)? {
+        return Ok(splice(&xml, u_range, &xml_escape(unit)));
+    }
+
     let loc = locate(&xml, component)?;
     let props_range = loc.props_range.expect("ensure_props guarantees <Props>");
     let props_text = &xml[props_range.clone()];
 
-    let new_props = if let Some(u_range) = find_attr_value_range(props_text, "Unit") {
-        // A Unit already exists somewhere in the Props subtree — replace its value.
-        let abs = (props_range.start + u_range.start)..(props_range.start + u_range.end);
-        return Ok(splice(&xml, abs, &xml_escape(unit)));
-    } else if props_self_closing(props_text) {
+    let new_props = if props_self_closing(props_text) {
         // `<Props …/>` -> `<Props …><Locale><Default Unit="…"/></Locale></Props>`.
         let open = props_text.trim_end();
         let open = open.strip_suffix("/>").unwrap();
@@ -315,29 +327,23 @@ fn set_props_attr(
     value: &str,
 ) -> Result<String, EditError> {
     let xml = ensure_props(xml, component)?;
+
+    // Replace the attribute's value, located precisely via the XML parser so the
+    // range is the real value and never a false text match inside another
+    // attribute's quoted value (which spliced across attribute boundaries and
+    // wrote not-well-formed XML while reporting success) (#5).
+    if let Some(vr) = props_attr_value_range(&xml, component, attr)? {
+        return Ok(splice(&xml, vr, &xml_escape(value)));
+    }
+
+    // Attribute absent: insert ` attr="value"` immediately after the `<Props`
+    // tag name. Valid whether or not the tag already has attributes and whether
+    // it is self-closing (`<Props/>` -> `<Props attr="…"/>`).
     let loc = locate(&xml, component)?;
     let props_range = loc.props_range.expect("ensure_props guarantees <Props>");
-    // Only touch the opening tag of <Props> (up to the first '>').
-    let open_end = xml[props_range.clone()]
-        .find('>')
-        .map(|i| props_range.start + i)
-        .ok_or_else(|| EditError::Invalid("malformed <Props>".into()))?;
-    let open_tag = &xml[props_range.start..open_end];
-
-    if let Some(vr) = find_attr_value_range(open_tag, attr) {
-        let abs = (props_range.start + vr.start)..(props_range.start + vr.end);
-        Ok(splice(&xml, abs, &xml_escape(value)))
-    } else {
-        // Insert `attr="value"` just before the end of the opening tag, handling
-        // a self-closing `<Props …/>` (drop the `/`).
-        let insert_at = if open_tag.trim_end().ends_with('/') {
-            xml[..open_end].rfind('/').unwrap()
-        } else {
-            open_end
-        };
-        let frag = format!(" {attr}=\"{}\"", xml_escape(value));
-        Ok(splice(&xml, insert_at..insert_at, &frag))
-    }
+    let insert_at = props_range.start + "<Props".len();
+    let frag = format!(" {attr}=\"{}\"", xml_escape(value));
+    Ok(splice(&xml, insert_at..insert_at, &frag))
 }
 
 /// Ensure the component has a `<Props>` child; if it is `<Component …/>`
@@ -368,28 +374,50 @@ fn props_self_closing(props_text: &str) -> bool {
     props_text.trim_end().ends_with("/>")
 }
 
-/// Find the byte range of an attribute's *value* (between the quotes) within `s`.
-/// Matches `attr="…"` with optional surrounding whitespace; returns the inner span.
-fn find_attr_value_range(s: &str, attr: &str) -> Option<std::ops::Range<usize>> {
-    let mut from = 0;
-    while let Some(i) = s[from..].find(attr) {
-        let at = from + i;
-        // Must be a whole attribute name: preceded by whitespace/'<', followed by `="`.
-        let before_ok =
-            at == 0 || s.as_bytes()[at - 1].is_ascii_whitespace() || s.as_bytes()[at - 1] == b'<';
-        let after = &s[at + attr.len()..];
-        let after_trim = after.trim_start();
-        if before_ok && after_trim.starts_with('=') {
-            let eq = after.find('=').unwrap();
-            let rest = &after[eq + 1..];
-            let q = rest.find('"')?;
-            let val_start = at + attr.len() + eq + 1 + q + 1;
-            let val_end = val_start + s[val_start..].find('"')?;
-            return Some(val_start..val_end);
-        }
-        from = at + attr.len();
-    }
-    None
+/// The byte range (in `xml`) of the value of `attr` on the target component's
+/// `<Props>` opening tag, located via the XML parser. `roxmltree`'s
+/// `range_value()` is the exact span between the quotes, so the replace can never
+/// land inside another attribute's quoted value (#5).
+fn props_attr_value_range(
+    xml: &str,
+    component: &str,
+    attr: &str,
+) -> Result<Option<std::ops::Range<usize>>, EditError> {
+    let doc = roxmltree::Document::parse(xml).map_err(|e| EditError::Xml(e.to_string()))?;
+    let comp = doc
+        .descendants()
+        .find(|n| n.has_tag_name("Component") && n.attribute("Name") == Some(component))
+        .ok_or_else(|| EditError::NoSuchComponent(component.to_string()))?;
+    Ok(comp
+        .children()
+        .find(|c| c.has_tag_name("Props"))
+        .and_then(|p| p.attribute_node(attr))
+        .map(|a| a.range_value()))
+}
+
+/// The byte range of the `Unit` value on this component's `<Default>` element —
+/// the real display unit (`<Props><Locale><Default Unit="…"/>`) — located via the
+/// XML parser so a `Unit="…"` in a comment or a non-`Default` element is ignored
+/// rather than mutated (#7).
+fn default_unit_value_range(
+    xml: &str,
+    component: &str,
+) -> Result<Option<std::ops::Range<usize>>, EditError> {
+    let doc = roxmltree::Document::parse(xml).map_err(|e| EditError::Xml(e.to_string()))?;
+    let comp = doc
+        .descendants()
+        .find(|n| n.has_tag_name("Component") && n.attribute("Name") == Some(component))
+        .ok_or_else(|| EditError::NoSuchComponent(component.to_string()))?;
+    Ok(comp
+        .children()
+        .find(|c| c.has_tag_name("Props"))
+        .and_then(|props| {
+            props
+                .descendants()
+                .find(|d| d.has_tag_name("Default") && d.has_attribute("Unit"))
+        })
+        .and_then(|d| d.attribute_node("Unit"))
+        .map(|a| a.range_value()))
 }
 
 fn splice(s: &str, range: std::ops::Range<usize>, replacement: &str) -> String {
@@ -564,5 +592,56 @@ mod tests {
         let rates = available_rates(PRJ).unwrap();
         assert!(rates.contains(&"100Hz".to_string()));
         assert!(rates.contains(&"Startup".to_string()));
+    }
+
+    #[test]
+    fn set_props_attr_ignores_match_inside_another_attr_value() {
+        // #5: an earlier attribute's value contains ` Type=`. The replace must
+        // target the real `Type` attribute, not splice across the Validation
+        // value's closing quote — which produced not-well-formed XML.
+        let prj = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession><Project Name="T"><ComponentStream><List>
+<Component Classname="BuiltIn.Channel" Name="Root.X"><Props Validation="if Type=invalid reject" Type="f32"/></Component>
+</List></ComponentStream></Project></MoTeCM1BuildSession>"#;
+        let out = set_type(prj, "Root.X", "u16").unwrap();
+        parses(&out); // old code wrote `...reject"u16"f32"` — not well-formed
+        assert!(out.contains(r#"Type="u16""#));
+        assert!(out.contains(r#"Validation="if Type=invalid reject""#)); // untouched
+        assert!(!out.contains(r#"Type="f32""#));
+    }
+
+    #[test]
+    fn set_unit_targets_default_not_comment_or_sibling() {
+        // #7: a `Unit="…"` in a comment (and a non-Default sibling) must be
+        // ignored; only the real `<Default Unit>` display unit is replaced.
+        let prj = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession><Project Name="T"><ComponentStream><List>
+<Component Classname="BuiltIn.Channel" Name="Root.Y"><Props><!-- legacy Unit="deprecated" --><Meta Unit="bogus"/><Locale><Default Unit="rpm"/></Locale></Props></Component>
+</List></ComponentStream></Project></MoTeCM1BuildSession>"#;
+        let out = set_unit(prj, "Root.Y", "rad/s").unwrap();
+        parses(&out);
+        assert!(out.contains(r#"<Default Unit="rad/s"/>"#)); // the real unit changed
+        assert!(out.contains(r#"Unit="deprecated""#)); // comment untouched
+        assert!(out.contains(r#"<Meta Unit="bogus"/>"#)); // sibling untouched
+    }
+
+    #[test]
+    fn create_channel_anchors_on_direct_child_not_grandchild() {
+        // #8: Root.Engine has direct children (…Update) and a grandchild
+        // (Root.Engine.Sub.Tick). The new sibling must land after the last
+        // DIRECT child, not after the grandchild.
+        let out = create_channel(PRJ, "Root.Engine.New", None, None, None).unwrap();
+        parses(&out);
+        let newc = out.find(r#"Name="Root.Engine.New""#).unwrap();
+        let update = out.find(r#"Name="Root.Engine.Update""#).unwrap();
+        let grandchild = out.find(r#"Name="Root.Engine.Sub.Tick""#).unwrap();
+        assert!(
+            newc > update,
+            "new channel should follow the last direct child"
+        );
+        assert!(
+            newc < grandchild,
+            "new channel must not be placed after the grandchild Sub.Tick"
+        );
     }
 }
