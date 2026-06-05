@@ -120,10 +120,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         | SetCallRate { project, .. } => project,
         ListRates { .. } => unreachable!(),
     };
-    // Decode tolerantly and remember the source encoding so the write-back
-    // re-encodes in the same encoding (don't transcode a Windows-1252 file to
-    // UTF-8 behind MoTeC's back).
-    let (xml, encoding) = m1_workspace::read_text_with_encoding(project)?;
+    // Decode tolerantly (UTF-8 with a Windows-1252 fallback). The write-back
+    // encoding is determined from MoTeC's convention below, not by sniffing.
+    let xml = m1_workspace::read_text(project)?;
 
     let out = match &cli.command {
         CreateChannel {
@@ -168,10 +167,15 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
-        // Re-encode in the file's original encoding so a Windows-1252 `°` stays a
-        // single 0xB0 byte rather than UTF-8 `0xC2 0xB0`. `encode_checked` refuses
-        // (rather than silently writing `?`) when the new content needs a
-        // character Windows-1252 cannot represent, e.g. an ohm `Ω` (m1-workspace#6).
+        // Encode in the encoding MoTeC will READ the file back with — Windows-1252
+        // by convention (the prolog omits `encoding=` and the doc declares a
+        // `…1252` Locale) unless it explicitly declares UTF-8. Crucially this is
+        // NOT the byte-sniffed encoding: a pure-ASCII project sniffs as UTF-8,
+        // which would write a newly-inserted `°` as 2-byte UTF-8 that a 1252
+        // reader mojibakes to `Â°` (#12). With 1252, `°` stays the single byte
+        // 0xB0 and `encode_checked` REFUSES a unit MoTeC's 1252 cannot represent
+        // (e.g. ohm `Ω`) rather than silently corrupting it.
+        let encoding = motec_write_encoding(&out);
         let bytes = m1_workspace::encode_checked(&out, encoding)
             .map_err(|e| format!("cannot save in the file's {encoding:?} encoding: {e}"))?;
         // Atomic write: a temp file in the same directory, fsync'd, then renamed
@@ -181,6 +185,25 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Updated {}", project.display());
     }
     Ok(())
+}
+
+/// The encoding MoTeC will use to READ this XML back — which is what the
+/// write-back must emit. MoTeC writes its project/config/CAN XML as
+/// **Windows-1252** (the prolog omits `encoding=`, and the document declares a
+/// `…1252` Locale), so 1252 is the default; only an explicit `encoding="utf-8"`
+/// in the XML declaration means UTF-8. This deliberately does NOT use the
+/// byte-sniffed encoding (`read_text_with_encoding`): a pure-ASCII project sniffs
+/// as UTF-8, and a newly-inserted non-ASCII unit would then be written as UTF-8
+/// that a 1252 reader mojibakes (#12).
+fn motec_write_encoding(xml: &str) -> m1_workspace::Encoding {
+    let head = &xml[..xml.len().min(256)];
+    if let Some(end) = head.find("?>") {
+        let decl = head[..end].to_ascii_lowercase();
+        if decl.contains("encoding=\"utf-8\"") || decl.contains("encoding='utf-8'") {
+            return m1_workspace::Encoding::Utf8;
+        }
+    }
+    m1_workspace::Encoding::Windows1252
 }
 
 /// Write `bytes` to `path` atomically: write a sibling temp file, `fsync` it,
@@ -214,4 +237,30 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
         return Err(e);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn motec_write_encoding_defaults_to_1252_not_sniffed_utf8() {
+        // #12: MoTeC's prolog omits `encoding=`, so write-back must be
+        // Windows-1252 (what MoTeC reads) — NOT the UTF-8 a pure-ASCII file
+        // sniffs as. Only an explicit utf-8 declaration means UTF-8.
+        assert_eq!(
+            motec_write_encoding(
+                "<?xml version=\"1.0\"?>\n<Project Locale=\"English_Australia.1252\"/>"
+            ),
+            m1_workspace::Encoding::Windows1252
+        );
+        assert_eq!(
+            motec_write_encoding("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<x/>"),
+            m1_workspace::Encoding::Utf8
+        );
+        assert_eq!(
+            motec_write_encoding("<?xml version='1.0' encoding='utf-8'?>"),
+            m1_workspace::Encoding::Utf8
+        );
+    }
 }
