@@ -54,6 +54,10 @@ jobs:
   build:
     needs: check
     if: needs.check.outputs.should_release == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -97,6 +101,10 @@ jobs:
           # (nvim-m1#15)
           codesign --force --sign - "out/m1-project-${{ matrix.target }}${{ matrix.ext }}"
           codesign --verify --verbose "out/m1-project-${{ matrix.target }}${{ matrix.ext }}"
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: out/*
       - uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.target }}
