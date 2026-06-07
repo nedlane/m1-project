@@ -50,6 +50,40 @@ impl fmt::Display for EditError {
 }
 impl std::error::Error for EditError {}
 
+// LIFETIME NOTE: a `roxmltree::Node<'a, 'd>` borrows BOTH the parsed `Document`
+// (lifetime `'d`, the arena) and the source `&str` (`'a`). The `Document` value
+// itself is a local — so a helper can NOT return `(Document, Node)` together: the
+// returned `Node` would borrow a `Document` that is being moved out at the same
+// time (self-referential; the borrow checker rejects it with E0505/E0515). That
+// is *why* these helpers re-parse the (cheap) `&str` at each site and keep every
+// `Document` local to its caller:
+//   * `parse_xml` does the bare parse-and-map-error, shared by the scan helpers
+//     that walk all components (`exists`, `available_rates`, `create_channel`).
+//   * `parse_and_find` finds one `<Component>` in an *already-parsed* `doc` the
+//     CALLER owns, so the `doc` binding outlives the borrowed `Node`.
+// Do NOT "optimise" this into a single helper that owns the `Document` and hands
+// back a `Node`: it cannot compile, and the rebinds here (`let xml =
+// ensure_props(...)?;`) would only make the lifetime tangle worse.
+
+/// Parse `xml` into a `roxmltree::Document`, mapping a parse failure to
+/// [`EditError::Xml`] with the same message every call site used.
+fn parse_xml(xml: &str) -> Result<roxmltree::Document<'_>, EditError> {
+    roxmltree::Document::parse(xml).map_err(|e| EditError::Xml(e.to_string()))
+}
+
+/// Find the `<Component>` whose `Name` is `component` in an already-parsed `doc`,
+/// erroring with [`EditError::NoSuchComponent`] if absent. The caller owns `doc`
+/// so the returned `Node` (which borrows it) stays valid — see the LIFETIME NOTE
+/// above for why the `Document` is not created/returned here.
+fn parse_and_find<'a, 'd>(
+    doc: &'d roxmltree::Document<'a>,
+    component: &str,
+) -> Result<roxmltree::Node<'d, 'a>, EditError> {
+    doc.descendants()
+        .find(|n| n.has_tag_name("Component") && n.attribute("Name") == Some(component))
+        .ok_or_else(|| EditError::NoSuchComponent(component.to_string()))
+}
+
 /// A located component: its name, class, byte range of the whole `<Component>`
 /// element, and the byte range of its `<Props>` child if present.
 struct Located {
@@ -60,11 +94,8 @@ struct Located {
 
 /// Find a component by its fully-qualified `Name`, returning its layout.
 fn locate(xml: &str, name: &str) -> Result<Located, EditError> {
-    let doc = roxmltree::Document::parse(xml).map_err(|e| EditError::Xml(e.to_string()))?;
-    let node = doc
-        .descendants()
-        .find(|n| n.has_tag_name("Component") && n.attribute("Name") == Some(name))
-        .ok_or_else(|| EditError::NoSuchComponent(name.to_string()))?;
+    let doc = parse_xml(xml)?;
+    let node = parse_and_find(&doc, name)?;
     let props_range = node
         .children()
         .find(|c| c.has_tag_name("Props"))
@@ -78,7 +109,7 @@ fn locate(xml: &str, name: &str) -> Result<Located, EditError> {
 
 /// True if a component with this exact `Name` exists.
 fn exists(xml: &str, name: &str) -> Result<bool, EditError> {
-    let doc = roxmltree::Document::parse(xml).map_err(|e| EditError::Xml(e.to_string()))?;
+    let doc = parse_xml(xml)?;
     Ok(doc
         .descendants()
         .any(|n| n.has_tag_name("Component") && n.attribute("Name") == Some(name)))
@@ -130,7 +161,7 @@ pub fn create_channel(
     let mut anchor_end = parent_loc.range.end;
     let mut anchor_for_indent = parent_loc.range.start;
     {
-        let doc = roxmltree::Document::parse(xml).map_err(|e| EditError::Xml(e.to_string()))?;
+        let doc = parse_xml(xml)?;
         for n in doc.descendants().filter(|n| n.has_tag_name("Component")) {
             // Anchor on the last *direct* child of `parent` — one whose Name is
             // exactly one segment deeper. `starts_with(&prefix)` alone also
@@ -221,7 +252,9 @@ pub fn set_unit(xml: &str, component: &str, unit: &str) -> Result<String, EditEr
     let new_props = if props_self_closing(props_text) {
         // `<Props …/>` -> `<Props …><Locale><Default Unit="…"/></Locale></Props>`.
         let open = props_text.trim_end();
-        let open = open.strip_suffix("/>").unwrap();
+        let open = open
+            .strip_suffix("/>")
+            .expect("checked by props_self_closing above");
         format!(
             "{open}><Locale><Default Unit=\"{}\"/></Locale></Props>",
             xml_escape(unit)
@@ -282,7 +315,7 @@ pub fn set_call_rate(xml: &str, script: &str, rate: &str) -> Result<String, Edit
 
 /// The `On <…>` clock leaves available under `Root.Events` (for an editor picker).
 pub fn available_rates(xml: &str) -> Result<Vec<String>, EditError> {
-    let doc = roxmltree::Document::parse(xml).map_err(|e| EditError::Xml(e.to_string()))?;
+    let doc = parse_xml(xml)?;
     let mut out: Vec<String> = doc
         .descendants()
         .filter(|n| n.has_tag_name("Component"))
@@ -356,7 +389,10 @@ fn ensure_props(xml: &str, component: &str) -> Result<String, EditError> {
     let elem = &xml[loc.range.clone()];
     let indent = indent_at(xml, loc.range.start).to_string();
     if elem.trim_end().ends_with("/>") {
-        let open = elem.trim_end().strip_suffix("/>").unwrap();
+        let open = elem
+            .trim_end()
+            .strip_suffix("/>")
+            .expect("checked by ends_with(\"/>\") above");
         let new = format!("{open}>\n{indent} <Props/>\n{indent}</Component>");
         Ok(splice(xml, loc.range, &new))
     } else {
@@ -383,11 +419,8 @@ fn props_attr_value_range(
     component: &str,
     attr: &str,
 ) -> Result<Option<std::ops::Range<usize>>, EditError> {
-    let doc = roxmltree::Document::parse(xml).map_err(|e| EditError::Xml(e.to_string()))?;
-    let comp = doc
-        .descendants()
-        .find(|n| n.has_tag_name("Component") && n.attribute("Name") == Some(component))
-        .ok_or_else(|| EditError::NoSuchComponent(component.to_string()))?;
+    let doc = parse_xml(xml)?;
+    let comp = parse_and_find(&doc, component)?;
     Ok(comp
         .children()
         .find(|c| c.has_tag_name("Props"))
@@ -403,11 +436,8 @@ fn default_unit_value_range(
     xml: &str,
     component: &str,
 ) -> Result<Option<std::ops::Range<usize>>, EditError> {
-    let doc = roxmltree::Document::parse(xml).map_err(|e| EditError::Xml(e.to_string()))?;
-    let comp = doc
-        .descendants()
-        .find(|n| n.has_tag_name("Component") && n.attribute("Name") == Some(component))
-        .ok_or_else(|| EditError::NoSuchComponent(component.to_string()))?;
+    let doc = parse_xml(xml)?;
+    let comp = parse_and_find(&doc, component)?;
     Ok(comp
         .children()
         .find(|c| c.has_tag_name("Props"))

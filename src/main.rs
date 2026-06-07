@@ -88,6 +88,23 @@ enum Command {
     },
 }
 
+impl Command {
+    /// The `--project` path this subcommand targets. Every subcommand carries one,
+    /// so this is total — a `match` over all arms rather than an `unreachable!()`
+    /// fallthrough, so adding a subcommand that *forgets* `project` is a compile
+    /// error here instead of a silent runtime panic.
+    fn project_path(&self) -> &PathBuf {
+        match self {
+            Command::CreateChannel { project, .. }
+            | Command::SetSecurity { project, .. }
+            | Command::SetType { project, .. }
+            | Command::SetUnit { project, .. }
+            | Command::SetCallRate { project, .. }
+            | Command::ListRates { project, .. } => project,
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(&cli) {
@@ -113,14 +130,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let project = match &cli.command {
-        CreateChannel { project, .. }
-        | SetSecurity { project, .. }
-        | SetType { project, .. }
-        | SetUnit { project, .. }
-        | SetCallRate { project, .. } => project,
-        ListRates { .. } => unreachable!(),
-    };
+    let project = cli.command.project_path();
     // Decode tolerantly (UTF-8 with a Windows-1252 fallback). The write-back
     // encoding is determined from MoTeC's convention below, not by sniffing.
     let xml =
