@@ -105,7 +105,8 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let ListRates { project } = &cli.command {
         // Decode tolerantly: MoTeC writes Windows-1252 for non-ASCII bytes
         // (e.g. `°`), which `read_to_string` would reject as invalid UTF-8.
-        let (xml, _enc) = m1_workspace::read_text_with_encoding(project)?;
+        let (xml, _enc) = m1_workspace::read_text_with_encoding(project)
+            .map_err(|e| format!("{}: {e}", project.display()))?;
         for r in m1_project::available_rates(&xml)? {
             println!("{r}");
         }
@@ -122,7 +123,8 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     // Decode tolerantly (UTF-8 with a Windows-1252 fallback). The write-back
     // encoding is determined from MoTeC's convention below, not by sniffing.
-    let xml = m1_workspace::read_text(project)?;
+    let xml =
+        m1_workspace::read_text(project).map_err(|e| format!("{}: {e}", project.display()))?;
 
     let out = match &cli.command {
         CreateChannel {
