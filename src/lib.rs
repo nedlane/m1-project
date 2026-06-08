@@ -245,6 +245,15 @@ pub fn set_unit(xml: &str, component: &str, unit: &str) -> Result<String, EditEr
         return Ok(splice(&xml, u_range, &xml_escape(unit)));
     }
 
+    // A `<Default>` may already exist carrying other attributes but no `Unit`
+    // (the corpus is full of `<Default DPS="3"/>` / `<Default Min Max/>`). Add
+    // the `Unit` to *that* element rather than appending a whole second
+    // `<Locale>`, which would duplicate the element and orphan its DPS/format.
+    if let Some(insert_at) = default_unit_insert_point(&xml, component)? {
+        let frag = format!(" Unit=\"{}\"", xml_escape(unit));
+        return Ok(splice(&xml, insert_at..insert_at, &frag));
+    }
+
     let loc = locate(&xml, component)?;
     let props_range = loc.props_range.expect("ensure_props guarantees <Props>");
     let props_text = &xml[props_range.clone()];
@@ -450,6 +459,25 @@ fn default_unit_value_range(
         .map(|a| a.range_value()))
 }
 
+/// The byte offset just after the `<Default` tag name of this component's
+/// existing `<Props><Locale><Default …>` element that has **no** `Unit`
+/// attribute yet — the point to splice ` Unit="…"` into. `None` if there is no
+/// such `<Default>` (so the caller falls back to creating the whole `<Locale>`).
+fn default_unit_insert_point(xml: &str, component: &str) -> Result<Option<usize>, EditError> {
+    let doc = parse_xml(xml)?;
+    let comp = parse_and_find(&doc, component)?;
+    Ok(comp
+        .children()
+        .find(|c| c.has_tag_name("Props"))
+        .and_then(|props| {
+            props
+                .descendants()
+                .find(|d| d.has_tag_name("Default") && !d.has_attribute("Unit"))
+        })
+        // node.range() spans the whole element; insert right after `<Default`.
+        .map(|d| d.range().start + "<Default".len()))
+}
+
 fn splice(s: &str, range: std::ops::Range<usize>, replacement: &str) -> String {
     let mut out = String::with_capacity(s.len() - (range.end - range.start) + replacement.len());
     out.push_str(&s[..range.start]);
@@ -580,6 +608,34 @@ mod tests {
         parses(&out2);
         assert!(out2.contains(r#"Unit="rad/s""#) && !out2.contains(r#"Unit="rpm""#));
         assert_eq!(out2.matches("Unit=").count(), 1);
+    }
+
+    #[test]
+    fn set_unit_adds_unit_to_existing_default_without_unit() {
+        // The corpus is full of `<Default DPS="3"/>` / `<Default Min Max/>` —
+        // a <Locale><Default> that carries other attributes but no Unit yet.
+        // set_unit must add the Unit *to that Default*, not append a second
+        // <Locale> (which duplicates the element and drops the existing DPS).
+        let prj = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession><Project Name="T"><ComponentStream><List>
+<Component Classname="BuiltIn.Channel" Name="Root.Y"><Props Type="f32"><Locale><Default DPS="3"/></Locale></Props></Component>
+</List></ComponentStream></Project></MoTeCM1BuildSession>"#;
+        let out = set_unit(prj, "Root.Y", "rpm").unwrap();
+        parses(&out);
+        assert_eq!(
+            out.matches("<Locale>").count(),
+            1,
+            "must reuse the existing <Locale>, not append a second one"
+        );
+        assert_eq!(out.matches("<Default").count(), 1, "single <Default>");
+        assert!(out.contains(r#"DPS="3""#), "existing DPS must be preserved");
+        assert!(out.contains(r#"Unit="rpm""#), "Unit added to the Default");
+        // Idempotent / replaceable: a second set_unit just swaps the value.
+        let out2 = set_unit(&out, "Root.Y", "rad/s").unwrap();
+        parses(&out2);
+        assert_eq!(out2.matches("Unit=").count(), 1);
+        assert!(out2.contains(r#"DPS="3""#));
+        assert!(out2.contains(r#"Unit="rad/s""#) && !out2.contains(r#"Unit="rpm""#));
     }
 
     #[test]
