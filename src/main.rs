@@ -192,8 +192,10 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("cannot save in the file's {encoding:?} encoding: {e}"))?;
         // Atomic write: a temp file in the same directory, fsync'd, then renamed
         // over the target — an interruption/panic/ENOSPC can no longer truncate
-        // the irreplaceable project file mid-write (#6).
-        write_atomic(project, &bytes)?;
+        // the irreplaceable project file mid-write (#6). `m1_workspace::atomic_write`
+        // also preserves the existing file's permission mode, so a tightened
+        // `0o600` Project.m1prj is not silently widened on every edit.
+        m1_workspace::atomic_write(project, &bytes)?;
         eprintln!("Updated {}", project.display());
     }
     Ok(())
@@ -216,39 +218,6 @@ fn motec_write_encoding(xml: &str) -> m1_workspace::Encoding {
         }
     }
     m1_workspace::Encoding::Windows1252
-}
-
-/// Write `bytes` to `path` atomically: write a sibling temp file, `fsync` it,
-/// then `rename` it over `path` (atomic on the same filesystem). Avoids the
-/// `O_TRUNC`-then-write window that could leave the project file empty/partial.
-fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let dir = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("Project.m1prj");
-    // Same directory (so rename is atomic), hidden, and pid-tagged to avoid
-    // colliding with a concurrent run.
-    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-    let write_result = (|| -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        Ok(())
-    })();
-    if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
