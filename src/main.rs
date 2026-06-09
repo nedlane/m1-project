@@ -5,13 +5,13 @@
 //! `--stdout` (write to stdout instead of the file). Designed to be invoked by the
 //! editor extensions (m1-vscode, nvim-m1) so a developer never hand-edits the XML.
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Parser)]
 #[command(
     name = "m1-project",
-    about = "Edit a MoTeC M1 Project.m1prj (create channels, set permissions/unit/type, set call rate)",
+    about = "Edit a MoTeC M1 Project.m1prj (create channels/groups, delete, rename, validate, list)",
     version
 )]
 struct Cli {
@@ -43,6 +43,39 @@ enum Command {
         /// Security level (Tune, Calibration, Master Calibration, Resource).
         #[arg(long)]
         security: Option<String>,
+    },
+    /// Create a new BuiltIn.GroupCompound under an existing group.
+    CreateGroup {
+        #[arg(long)]
+        project: PathBuf,
+        /// Fully-qualified name, e.g. `Root.Engine.NewSubsystem`.
+        #[arg(long)]
+        name: String,
+    },
+    /// Delete a component (and optionally its whole subtree).
+    DeleteComponent {
+        #[arg(long)]
+        project: PathBuf,
+        /// Fully-qualified component name to delete.
+        #[arg(long)]
+        name: String,
+        /// Also delete all child components (the whole subtree).
+        #[arg(long)]
+        recursive: bool,
+        /// Delete even if other components reference this one via SelectedTrigger.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Rename a component, updating all SelectedTrigger references in the file.
+    RenameComponent {
+        #[arg(long)]
+        project: PathBuf,
+        /// Fully-qualified current name, e.g. `Root.Engine`.
+        #[arg(long)]
+        name: String,
+        /// New single-segment name (no dots), e.g. `Motor`.
+        #[arg(long)]
+        new_name: String,
     },
     /// Set a component's security / access level.
     SetSecurity {
@@ -86,6 +119,19 @@ enum Command {
         #[arg(long)]
         project: PathBuf,
     },
+    /// Validate the project for structural correctness (read-only; exit 1 on findings).
+    Validate {
+        #[arg(long)]
+        project: PathBuf,
+    },
+    /// List all components in the project.
+    ListComponents {
+        #[arg(long)]
+        project: PathBuf,
+        /// Emit JSON (array of objects with path/classname/type/unit/security/call_rate).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 impl Command {
@@ -96,11 +142,16 @@ impl Command {
     fn project_path(&self) -> &PathBuf {
         match self {
             Command::CreateChannel { project, .. }
+            | Command::CreateGroup { project, .. }
+            | Command::DeleteComponent { project, .. }
+            | Command::RenameComponent { project, .. }
             | Command::SetSecurity { project, .. }
             | Command::SetType { project, .. }
             | Command::SetUnit { project, .. }
             | Command::SetCallRate { project, .. }
-            | Command::ListRates { project, .. } => project,
+            | Command::ListRates { project, .. }
+            | Command::Validate { project, .. }
+            | Command::ListComponents { project, .. } => project,
         }
     }
 }
@@ -108,7 +159,7 @@ impl Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(&cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
@@ -116,18 +167,98 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     use Command::*;
-    // list-rates is read-only; handle it before the read/edit/write flow.
-    if let ListRates { project } = &cli.command {
-        // Decode tolerantly: MoTeC writes Windows-1252 for non-ASCII bytes
-        // (e.g. `°`), which `read_to_string` would reject as invalid UTF-8.
-        let (xml, _enc) = m1_workspace::read_text_with_encoding(project)
-            .map_err(|e| format!("{}: {e}", project.display()))?;
-        for r in m1_project::available_rates(&xml)? {
-            println!("{r}");
+
+    // Read-only subcommands that don't go through the edit/write flow.
+    match &cli.command {
+        ListRates { project } => {
+            // Decode tolerantly: MoTeC writes Windows-1252 for non-ASCII bytes
+            // (e.g. `°`), which `read_to_string` would reject as invalid UTF-8.
+            let (xml, _enc) = m1_workspace::read_text_with_encoding(project)
+                .map_err(|e| format!("{}: {e}", project.display()))?;
+            for r in m1_project::available_rates(&xml)? {
+                println!("{r}");
+            }
+            return Ok(ExitCode::SUCCESS);
         }
-        return Ok(());
+        Validate { project } => {
+            let (xml, _enc) = m1_workspace::read_text_with_encoding(project)
+                .map_err(|e| format!("{}: {e}", project.display()))?;
+            let findings = m1_project::validate(&xml)?;
+            let errors = findings
+                .iter()
+                .filter(|f| f.level == m1_project::FindingLevel::Error)
+                .count();
+            let warnings = findings
+                .iter()
+                .filter(|f| f.level == m1_project::FindingLevel::Warning)
+                .count();
+            for f in &findings {
+                println!("{f}");
+            }
+            println!(
+                "{} finding(s): {} error(s), {} warning(s)",
+                findings.len(),
+                errors,
+                warnings
+            );
+            return Ok(if errors > 0 {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            });
+        }
+        ListComponents { project, json } => {
+            let (xml, _enc) = m1_workspace::read_text_with_encoding(project)
+                .map_err(|e| format!("{}: {e}", project.display()))?;
+            let entries = m1_project::list_components(&xml)?;
+            if *json {
+                println!("[");
+                for (i, e) in entries.iter().enumerate() {
+                    let comma = if i + 1 < entries.len() { "," } else { "" };
+                    // Emit one JSON object per component.
+                    let ty_json = json_string_or_null(e.ty.as_deref());
+                    let unit_json = json_string_or_null(e.unit.as_deref());
+                    let sec_json = json_string_or_null(e.security.as_deref());
+                    let cr_json = json_string_or_null(e.call_rate.as_deref());
+                    println!(
+                        "  {{\"path\":{},\"classname\":{},\"type\":{},\"unit\":{},\"security\":{},\"call_rate\":{}}}{}",
+                        json_string(&e.path),
+                        json_string(&e.classname),
+                        ty_json,
+                        unit_json,
+                        sec_json,
+                        cr_json,
+                        comma
+                    );
+                }
+                println!("]");
+            } else {
+                for e in &entries {
+                    let indent = "  ".repeat(e.depth);
+                    let mut props = Vec::new();
+                    if let Some(c) = &e.classname.strip_prefix("BuiltIn.") {
+                        props.push(c.to_string());
+                    } else {
+                        props.push(e.classname.clone());
+                    }
+                    if let Some(t) = &e.ty {
+                        props.push(format!("type={t}"));
+                    }
+                    if let Some(u) = &e.unit {
+                        props.push(format!("unit={u}"));
+                    }
+                    if let Some(s) = &e.security {
+                        props.push(format!("security={s}"));
+                    }
+                    let segment = e.path.rsplit('.').next().unwrap_or(&e.path);
+                    println!("{indent}{segment}  [{}]", props.join(", "));
+                }
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+        _ => {}
     }
 
     let project = cli.command.project_path();
@@ -135,6 +266,16 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // encoding is determined from MoTeC's convention below, not by sniffing.
     let xml =
         m1_workspace::read_text(project).map_err(|e| format!("{}: {e}", project.display()))?;
+
+    // Subcommands that produce a warning (rename) are handled here before the
+    // general edit/write flow.
+    if let RenameComponent { name, new_name, .. } = &cli.command {
+        let (out, script_warnings) = m1_project::rename_component(&xml, name, new_name)?;
+        for w in &script_warnings {
+            eprintln!("warning: backing file may need renaming: {w}");
+        }
+        return write_or_print(cli, project, &xml, &out);
+    }
 
     let out = match &cli.command {
         CreateChannel {
@@ -150,6 +291,13 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             unit.as_deref(),
             security.as_deref(),
         )?,
+        CreateGroup { name, .. } => m1_project::create_group(&xml, name)?,
+        DeleteComponent {
+            name,
+            recursive,
+            force,
+            ..
+        } => m1_project::delete_component(&xml, name, *recursive, *force)?,
         SetSecurity {
             component,
             security,
@@ -162,9 +310,21 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             component, unit, ..
         } => m1_project::set_unit(&xml, component, unit)?,
         SetCallRate { script, rate, .. } => m1_project::set_call_rate(&xml, script, rate)?,
-        ListRates { .. } => unreachable!(),
+        ListRates { .. } | Validate { .. } | ListComponents { .. } | RenameComponent { .. } => {
+            unreachable!()
+        }
     };
 
+    write_or_print(cli, project, &xml, &out)
+}
+
+/// Either print to stdout (dry-run / --stdout) or write back to the project file.
+fn write_or_print(
+    cli: &Cli,
+    project: &Path,
+    _original: &str,
+    out: &str,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
     if cli.dry_run || cli.stdout {
         print!("{out}");
     } else {
@@ -172,7 +332,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         // edits are parser-located and validated by tests, but re-parsing the
         // result before the irreversible write guarantees a bug can never persist
         // corruption to the canonical project file (#5).
-        if let Err(e) = roxmltree::Document::parse(&out) {
+        if let Err(e) = roxmltree::Document::parse(out) {
             return Err(format!(
                 "refusing to write malformed XML to {}: {e}",
                 project.display()
@@ -187,8 +347,8 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         // reader mojibakes to `Â°` (#12). With 1252, `°` stays the single byte
         // 0xB0 and `encode_checked` REFUSES a unit MoTeC's 1252 cannot represent
         // (e.g. ohm `Ω`) rather than silently corrupting it.
-        let encoding = motec_write_encoding(&out);
-        let bytes = m1_workspace::encode_checked(&out, encoding)
+        let encoding = motec_write_encoding(out);
+        let bytes = m1_workspace::encode_checked(out, encoding)
             .map_err(|e| format!("cannot save in the file's {encoding:?} encoding: {e}"))?;
         // Atomic write: a temp file in the same directory, fsync'd, then renamed
         // over the target — an interruption/panic/ENOSPC can no longer truncate
@@ -198,7 +358,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         m1_workspace::atomic_write(project, &bytes)?;
         eprintln!("Updated {}", project.display());
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The encoding MoTeC will use to READ this XML back — which is what the
@@ -218,6 +378,20 @@ fn motec_write_encoding(xml: &str) -> m1_workspace::Encoding {
         }
     }
     m1_workspace::Encoding::Windows1252
+}
+
+/// Produce a JSON string literal (with double-quote escaping).
+fn json_string(s: &str) -> String {
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// Produce a JSON string literal or `null` for an absent optional.
+fn json_string_or_null(s: Option<&str>) -> String {
+    match s {
+        Some(v) => json_string(v),
+        None => "null".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -243,5 +417,16 @@ mod tests {
             motec_write_encoding("<?xml version='1.0' encoding='utf-8'?>"),
             m1_workspace::Encoding::Utf8
         );
+    }
+
+    #[test]
+    fn json_string_escapes_quotes() {
+        assert_eq!(json_string(r#"say "hi""#), r#""say \"hi\"""#);
+    }
+
+    #[test]
+    fn json_string_or_null_absent() {
+        assert_eq!(json_string_or_null(None), "null");
+        assert_eq!(json_string_or_null(Some("rpm")), "\"rpm\"");
     }
 }
