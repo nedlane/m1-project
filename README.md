@@ -30,6 +30,12 @@ m1-project set-type       --project <p> --component <Root.X> --type <type>
 m1-project set-unit       --project <p> --component <Root.X> --unit <unit>
 m1-project set-call-rate  --project <p> --script <Root.Group.Script> --rate <N|startup>
 m1-project list-rates     --project <p>     # the On <N>Hz clocks available, one per line
+
+m1-project create-group     --project <p> --name <Root.Group.NewSubsystem>
+m1-project delete-component --project <p> --name <Root.X> [--recursive] [--force]
+m1-project rename-component --project <p> --name <Root.X> --new-name <Y>
+m1-project validate         --project <p>   # read-only structural check; exit 1 on errors
+m1-project list-components  --project <p> [--json]
 ```
 
 Global flags: `--dry-run` (print the modified project to stdout, don't write) and
@@ -43,6 +49,15 @@ Global flags: `--dry-run` (print the modified project to stdout, don't write) an
   (`Parent.×N.Events.On <N>Hz`, one `Parent.` per path segment), exactly as M1-Build
   encodes it. `--rate startup` selects `On Startup`; the clock must already exist
   (`list-rates` shows what's available).
+- **Delete:** a component with children needs `--recursive`; deleting a clock that
+  other scripts' `SelectedTrigger`s resolve to is refused unless `--force` (the
+  refusal lists the referencing scripts).
+- **Rename:** renames the component and all descendants, rewrites every
+  `SelectedTrigger` that resolves into the renamed subtree, and warns about backing
+  `.m1scr` files whose conventional names change (the tool never renames files).
+- **Validate:** all findings are printed (no fail-fast): well-formed/decodable XML,
+  duplicate sibling names, every `SelectedTrigger` resolving to a real
+  `BuiltIn.EventKernel` clock (`$(…)` expression triggers are skipped).
 
 ## Build
 

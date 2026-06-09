@@ -1,6 +1,6 @@
 [package]
 name = "m1-project"
-version = "0.2.6"
+version = "0.3.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Structured, validated editor for MoTeC M1 Project.m1prj files (create channels, set permissions/unit/type, set script call rate)"
