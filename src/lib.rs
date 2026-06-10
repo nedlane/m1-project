@@ -658,4 +658,168 @@ mod tests {
         let abs = resolve_trigger(owner, &trigger).unwrap();
         assert_eq!(abs, clock);
     }
+
+    // ---- <Organisation> view-tree sync -------------------------------------
+    //
+    // A real `.m1prj` carries the hierarchy twice: the flat `<List>` of real
+    // components AND a nested `<Organisation>` view tree (short names, no
+    // Classname) that M1-Build binds Properties through. Structural edits must
+    // keep both in sync or M1-Build fails to load the project. This fixture
+    // mirrors PRJ's components in an `<Organisation>` so the sync is exercised.
+
+    const PRJ_ORG: &str = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession>
+ <Project Name="T">
+  <ComponentStream>
+   <List>
+    <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+    <Component Classname="BuiltIn.GroupCompound" Name="Root.Engine"/>
+    <Component Classname="BuiltIn.Channel" Name="Root.Engine.Speed">
+     <Props Type="f32" Security="Tune"/>
+    </Component>
+    <Component Classname="BuiltIn.MethodUser" Name="Root.Engine.Update"/>
+    <Component Classname="BuiltIn.GroupCompound" Name="Root.Events"/>
+    <Component Classname="BuiltIn.EventKernel" Name="Root.Events.On 100Hz"/>
+   </List>
+   <Organisation>
+    <Component Name="Root">
+     <Component Name="Engine">
+      <Component Name="Speed"/>
+      <Component Name="Update"/>
+     </Component>
+     <Component Name="Events">
+      <Component Name="On 100Hz"/>
+     </Component>
+    </Component>
+   </Organisation>
+  </ComponentStream>
+ </Project>
+</MoTeCM1BuildSession>
+"#;
+
+    #[test]
+    fn create_channel_syncs_organisation() {
+        let out = create_channel(PRJ_ORG, "Root.Engine.Torque", Some("f32"), None, None).unwrap();
+        parses(&out);
+        // Added to the List…
+        assert!(out.contains(r#"Classname="BuiltIn.Channel" Name="Root.Engine.Torque""#));
+        // …AND as a short-name node inside the <Organisation> Engine group.
+        let org = &out[out.find("<Organisation>").unwrap()..];
+        assert!(
+            org.contains(r#"<Component Name="Torque"/>"#),
+            "new channel must appear in the Organisation view:\n{org}"
+        );
+        // The project stays internally consistent.
+        assert!(
+            validate(&out).unwrap().is_empty(),
+            "List/Organisation must stay in sync: {:?}",
+            validate(&out).unwrap()
+        );
+    }
+
+    #[test]
+    fn create_group_syncs_organisation() {
+        let out = create_group(PRJ_ORG, "Root.Engine.SubSystem").unwrap();
+        parses(&out);
+        let org = &out[out.find("<Organisation>").unwrap()..];
+        assert!(org.contains(r#"<Component Name="SubSystem"/>"#));
+        assert!(validate(&out).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_syncs_organisation() {
+        let out = delete_component(PRJ_ORG, "Root.Engine.Update", false, false).unwrap();
+        parses(&out);
+        // Gone from BOTH List and Organisation (so no dangling Properties ref).
+        assert!(!out.contains(r#"Name="Root.Engine.Update""#));
+        let org = &out[out.find("<Organisation>").unwrap()..];
+        assert!(
+            !org.contains(r#"<Component Name="Update"/>"#),
+            "deleted component must be removed from the Organisation view too:\n{org}"
+        );
+        assert!(validate(&out).unwrap().is_empty());
+        assert!(!out.contains("\n\n"), "no blank line left behind:\n{out}");
+    }
+
+    #[test]
+    fn delete_group_recursive_syncs_organisation() {
+        let out = delete_component(PRJ_ORG, "Root.Engine", true, false).unwrap();
+        parses(&out);
+        assert!(!out.contains("Root.Engine"));
+        let org = &out[out.find("<Organisation>").unwrap()..];
+        // The whole Engine subtree (incl. Speed/Update) is gone from the view.
+        assert!(!org.contains(r#"Name="Engine""#));
+        assert!(!org.contains(r#"Name="Speed""#));
+        assert!(validate(&out).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rename_syncs_organisation() {
+        let (out, _warns) = rename_component(PRJ_ORG, "Root.Engine", "Motor").unwrap();
+        parses(&out);
+        // List renamed (self + descendants).
+        assert!(out.contains(r#"Name="Root.Motor""#));
+        assert!(out.contains(r#"Name="Root.Motor.Speed""#));
+        assert!(!out.contains(r#"Name="Root.Engine""#));
+        // Organisation: the one node's short name changes; children keep theirs.
+        let org = &out[out.find("<Organisation>").unwrap()..];
+        assert!(
+            org.contains(r#"<Component Name="Motor">"#),
+            "view node must be renamed:\n{org}"
+        );
+        assert!(!org.contains(r#"<Component Name="Engine">"#));
+        assert!(
+            org.contains(r#"<Component Name="Speed"/>"#),
+            "child short name unchanged"
+        );
+        // No dangling Properties reference — M1-Build would load this.
+        assert!(
+            validate(&out).unwrap().is_empty(),
+            "rename must leave List/Organisation consistent: {:?}",
+            validate(&out).unwrap()
+        );
+    }
+
+    #[test]
+    fn rename_rejects_dotted_new_name() {
+        // The misuse that silently doubled the path (Root.CAN.Root.CAN.Foo).
+        let err = rename_component(PRJ_ORG, "Root.Engine", "Root.Motor").unwrap_err();
+        assert!(
+            matches!(err, EditError::Invalid(_)),
+            "dotted --new-name must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn ops_without_organisation_still_work() {
+        // PRJ has no <Organisation>; edits must still succeed (view sync no-ops).
+        let out = create_channel(PRJ, "Root.Engine.New", None, None, None).unwrap();
+        parses(&out);
+        assert!(out.contains(r#"Name="Root.Engine.New""#));
+        let (out2, _) = rename_component(PRJ, "Root.Engine", "Motor").unwrap();
+        parses(&out2);
+        assert!(out2.contains(r#"Name="Root.Motor""#));
+    }
+
+    #[test]
+    fn validate_detects_dangling_organisation_node() {
+        // A view node ("Ghost") with no matching real component — the exact shape
+        // a List-only rename/delete used to leave behind.
+        let prj = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession><Project Name="T"><ComponentStream>
+<List>
+<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+</List>
+<Organisation>
+<Component Name="Root"><Component Name="Ghost"/></Component>
+</Organisation>
+</ComponentStream></Project></MoTeCM1BuildSession>"#;
+        let findings = validate(prj).unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.level == FindingLevel::Error && f.path == "Root.Ghost"),
+            "dangling Organisation node must be an error, got: {findings:?}"
+        );
+    }
 }

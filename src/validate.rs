@@ -164,8 +164,63 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
         }
     }
 
+    // Check 4: <List> / <Organisation> consistency. M1-Build binds each object's
+    // Properties through the <Organisation> view tree, so the two must agree:
+    //   - a view node with no matching real component makes M1-Build FAIL TO LOAD
+    //     the project ("Unable to find Properties for object 'Root.X'"), and
+    //   - a real component absent from the view tree will not display.
+    // (Projects without any <Organisation> skip this check entirely.)
+    if doc.descendants().any(|n| n.has_tag_name("Organisation")) {
+        let mut org_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for org in doc.descendants().filter(|n| n.has_tag_name("Organisation")) {
+            collect_org_paths(org, "", &mut org_paths);
+        }
+        for p in &org_paths {
+            if !all_names.contains(p) {
+                findings.push(Finding {
+                    level: FindingLevel::Error,
+                    path: p.clone(),
+                    message:
+                        "<Organisation> view references a component missing from <List> (M1-Build cannot bind its Properties)"
+                            .into(),
+                });
+            }
+        }
+        for nm in &all_names {
+            if !org_paths.contains(nm) {
+                findings.push(Finding {
+                    level: FindingLevel::Warning,
+                    path: nm.clone(),
+                    message: "component is absent from the <Organisation> view (will not display in M1-Build)"
+                        .into(),
+                });
+            }
+        }
+    }
+
     findings.sort_by(|a, b| a.path.cmp(&b.path).then(a.message.cmp(&b.message)));
     Ok(findings)
+}
+
+/// Recursively collect the full dotted paths of every `<Organisation>` view node,
+/// joining the short `Name` segments level by level (`Root` -> `Root.CAN` -> …).
+fn collect_org_paths(
+    node: roxmltree::Node,
+    prefix: &str,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for child in node.children().filter(|c| c.has_tag_name("Component")) {
+        let Some(name) = child.attribute("Name") else {
+            continue;
+        };
+        let path = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}.{name}")
+        };
+        collect_org_paths(child, &path, out);
+        out.insert(path);
+    }
 }
 
 // ---- list-components --------------------------------------------------------

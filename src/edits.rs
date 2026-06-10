@@ -77,6 +77,13 @@ pub fn create_channel(
     out.push_str(&xml[..anchor_end]);
     out.push_str(&element);
     out.push_str(&xml[anchor_end..]);
+
+    // Mirror the new component into the `<Organisation>` view tree so M1-Build
+    // shows it and can bind its Properties (no-op if the project has no view tree).
+    let leaf = name.rsplit('.').next().unwrap_or(name);
+    if let Some(synced) = org_insert_child(&out, parent, leaf)? {
+        out = synced;
+    }
     Ok(out)
 }
 
@@ -140,6 +147,12 @@ pub fn create_group(xml: &str, name: &str) -> Result<String, EditError> {
     out.push_str(&xml[..anchor_end]);
     out.push_str(&element);
     out.push_str(&xml[anchor_end..]);
+
+    // Mirror the new group into the `<Organisation>` view tree (no-op without one).
+    let leaf = name.rsplit('.').next().unwrap_or(name);
+    if let Some(synced) = org_insert_child(&out, parent, leaf)? {
+        out = synced;
+    }
     Ok(out)
 }
 
@@ -298,6 +311,14 @@ pub fn delete_component(
     for range in ranges_to_remove {
         result = splice(&result, range, "");
     }
+
+    // Remove the matching `<Organisation>` view node. Its descendants are nested
+    // inside it, so the single removal takes the whole subtree with it — and the
+    // line is consumed so no blank line is left behind (no-op without a view tree).
+    if let Some((range, _)) = org_locate(&result, name)? {
+        let start = line_extended_start(&result, range.start);
+        result = splice(&result, start..range.end, "");
+    }
     Ok(result)
 }
 
@@ -313,6 +334,17 @@ pub fn rename_component(
     old_name: &str,
     new_segment: &str,
 ) -> Result<(String, Vec<String>), EditError> {
+    // `--new-name` is the new *leaf* segment only. A dotted value here is the
+    // classic misuse that silently produced a doubled path
+    // (`Root.CAN.` + `Root.CAN.Foo`); reject it explicitly rather than corrupt
+    // the project. (`validate_name_segment` is lenient — it only checks the last
+    // dot-segment — because `create_group` legitimately takes a full path.)
+    if new_segment.contains('.') {
+        return Err(EditError::Invalid(format!(
+            "--new-name must be a single segment with no dots, got `{new_segment}`; \
+             pass just the new leaf name, e.g. `Motor`"
+        )));
+    }
     validate_name_segment(new_segment)?;
 
     // Compute what the new full name will be.
@@ -464,6 +496,17 @@ pub fn rename_component(
         for (range, new_val) in trigger_fixes {
             result = splice(&result, range, &xml_escape(&new_val));
         }
+    }
+
+    // Pass 3: rename the matching `<Organisation>` view node. The view tree uses
+    // short names with descendants nested inside, so ONLY this node's segment
+    // changes — its children keep their (unchanged) short names. Navigate by the
+    // OLD path: passes 1-2 rewrote `<List>` Names and triggers but left the view
+    // tree alone, so it still carries the old segment here. (No-op without a
+    // view tree.) Missing this is what made M1-Build fail to load the project
+    // ("Unable to find Properties for object 'Root.X'").
+    if let Some((_, name_value)) = org_locate(&result, old_name)? {
+        result = splice(&result, name_value, &xml_escape(new_segment));
     }
 
     Ok((result, script_warnings))
