@@ -23,15 +23,19 @@ invalid project can't be produced.
 ## Commands
 
 ```
-m1-project create-channel --project <Project.m1prj> --name <Root.Group.Name>
-                          [--type f32] [--unit rpm] [--security Tune]
+m1-project create-channel   --project <Project.m1prj> --name <Root.Group.Name>
+                            [--type f32] [--unit rpm] [--security Tune]
+m1-project create-parameter --project <p> --name <Root.Group.Name>
+                            [--type f32] [--unit rpm] [--security Tune]
+m1-project create-group              --project <p> --name <Root.Group.NewSubsystem>
+m1-project create-function           --project <p> --name <Root.Group.Name>  # FuncUserParam + .m1scr
+m1-project create-scheduled-function --project <p> --name <Root.Group.Name>  # FuncUser + .m1scr
 m1-project set-security   --project <p> --component <Root.X> --security <level>
 m1-project set-type       --project <p> --component <Root.X> --type <type>
 m1-project set-unit       --project <p> --component <Root.X> --unit <unit>
 m1-project set-call-rate  --project <p> --script <Root.Group.Script> --rate <N|startup>
 m1-project list-rates     --project <p>     # the On <N>Hz clocks available, one per line
 
-m1-project create-group     --project <p> --name <Root.Group.NewSubsystem>
 m1-project delete-component --project <p> --name <Root.X> [--recursive] [--force]
 m1-project rename-component --project <p> --name <Root.X> --new-name <Y>
 m1-project validate         --project <p>   # read-only structural check; exit 1 on errors
@@ -52,9 +56,18 @@ Global flags: `--dry-run` (print the modified project to stdout, don't write) an
 - **Delete:** a component with children needs `--recursive`; deleting a clock that
   other scripts' `SelectedTrigger`s resolve to is refused unless `--force` (the
   refusal lists the referencing scripts).
+- **Create verbs** write exactly what M1-Build's *Insert → Built-in* writes: each
+  new component is added to both the `<List>` and the `<Organisation>` view tree
+  (M1-Build binds Properties through the latter), with the same bodies — a
+  `<Comment/>` for channels/parameters/groups, a `Filename` + empty `.m1scr` for
+  scheduled functions (`BuiltIn.FuncUser`), and a `Filename` + empty `<Signature>`
+  + `.m1scr` for functions (`BuiltIn.FuncUserParam`). The `.m1scr` is created under
+  the project's `Scripts/` directory.
 - **Rename:** renames the component and all descendants, rewrites every
-  `SelectedTrigger` that resolves into the renamed subtree, and warns about backing
-  `.m1scr` files whose conventional names change (the tool never renames files).
+  `SelectedTrigger` that resolves into the renamed subtree, updates the
+  `<Organisation>` view node, and — for renamed script components — rewrites the
+  `Filename` and **renames the backing `.m1scr` on disk** (under `Scripts/`),
+  exactly as M1-Build's UI does. `--new-name` is a single leaf segment (no dots).
 - **Validate:** all findings are printed (no fail-fast): well-formed/decodable XML,
   duplicate sibling names, every `SelectedTrigger` resolving to a real
   `BuiltIn.EventKernel` clock (`$(…)` expression triggers are skipped).
