@@ -69,6 +69,47 @@ pub fn list_components(xml: &str) -> Result<Vec<ComponentEntry>, EditError> {
     Ok(out)
 }
 
+/// A script component (`FuncUser`/`FuncUserParam`/legacy `MethodUser`) and the
+/// backing-script path it points at — used by the CLI to check that each script
+/// actually has code (M1-Build's "Missing code" error).
+#[derive(Debug)]
+pub struct ScriptComponent {
+    /// Fully-qualified dotted name.
+    pub path: String,
+    /// The `Filename` relative to the project's `Scripts/` directory. Falls back
+    /// to the conventional [`crate::script_relpath`] when the attribute is absent.
+    pub filename: String,
+}
+
+/// Every script component in the project, with its backing `.m1scr` path. These
+/// are the components whose body M1-Build compiles; an empty body is its
+/// "Missing code" error.
+pub fn script_components(xml: &str) -> Result<Vec<ScriptComponent>, EditError> {
+    let doc = parse_xml(xml)?;
+    let mut out = Vec::new();
+    for n in doc
+        .descendants()
+        .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
+    {
+        let Some(path) = n.attribute("Name") else {
+            continue;
+        };
+        let class = n.attribute("Classname").unwrap_or("");
+        if !(class.contains("FuncUser") || class.contains("MethodUser")) {
+            continue;
+        }
+        let filename = n
+            .attribute("Filename")
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::script_relpath(path));
+        out.push(ScriptComponent {
+            path: path.to_string(),
+            filename,
+        });
+    }
+    Ok(out)
+}
+
 // ---- path helpers -----------------------------------------------------------
 
 /// Resolve a group-relative `SelectedTrigger` value from `owner` to an absolute

@@ -33,6 +33,10 @@ m1-project create-scheduled-function --project <p> --name <Root.Group.Name>  # F
 m1-project set-security   --project <p> --component <Root.X> --security <level>
 m1-project set-type       --project <p> --component <Root.X> --type <type>
 m1-project set-unit       --project <p> --component <Root.X> --unit <unit>
+m1-project set-quantity   --project <p> --component <Root.X> --quantity <ratio|rad/s|…>
+m1-project set-validation --project <p> --component <Root.X> [--type MinMax --min <f> --max <f> | --type None]
+m1-project add-tag        --project <p> --component <Root.X> --tag <Tag>
+m1-project remove-tag     --project <p> --component <Root.X> --tag <Tag>
 m1-project set-call-rate  --project <p> --script <Root.Group.Script> --rate <N|startup>
 m1-project list-rates     --project <p>     # the On <N>Hz clocks available, one per line
 
@@ -68,9 +72,30 @@ Global flags: `--dry-run` (print the modified project to stdout, don't write) an
   `<Organisation>` view node, and — for renamed script components — rewrites the
   `Filename` and **renames the backing `.m1scr` on disk** (under `Scripts/`),
   exactly as M1-Build's UI does. `--new-name` is a single leaf segment (no dots).
-- **Validate:** all findings are printed (no fail-fast): well-formed/decodable XML,
-  duplicate sibling names, every `SelectedTrigger` resolving to a real
-  `BuiltIn.EventKernel` clock (`$(…)` expression triggers are skipped).
+- **Property setters from the Properties tab.** Beyond type/unit/security, these
+  mirror the M1-Build *Properties* rows and write exactly what M1-Build writes:
+  - `set-quantity` → `<Props Qty="…">` — the physical *Quantity* (e.g. `ratio`,
+    `rad/s`). Distinct from the display *unit*; if you change the quantity to a
+    different dimension, set a matching `--unit` too, or M1-Build reports
+    *Invalid display unit* (Error 1017).
+  - `set-validation` → `<Props Validation="MinMax" ValMin=… ValMax=…>` (bounds in
+    M1-Build's `%.17e` form), or `--type None` to clear all three.
+  - `add-tag` / `remove-tag` → `<Props><List.UserTags><Entry Value="Tag"/></List.UserTags>`,
+    the *Tags* row. A component missing a tag its class requires is M1-Build's
+    most common finding, *Mandatory tag not selected* (Warning 1142/1549);
+    `add-tag` is the fix. (Tags inherited from a parent group are not repeated in
+    the child's XML; `add-tag` writes an explicit per-component tag.)
+- **Validate:** all findings are printed (no fail-fast). Structural checks (pure,
+  on the XML): well-formed/decodable XML, duplicate sibling names, every
+  `SelectedTrigger` resolving to a real `BuiltIn.EventKernel` clock (`$(…)`
+  expression triggers are skipped), `<List>`/`<Organisation>` consistency, and —
+  mirroring M1-Build — a scheduled function (`BuiltIn.FuncUser`) with **no event
+  selected** (Error, = M1-Build Error 1623). The CLI additionally does one
+  file-aware check: a script component whose backing `.m1scr` **exists but is
+  empty** is *missing code* (= M1-Build Error 1024); an *absent* `.m1scr` is not a
+  finding (many library/base method slots — `Calculation`, `Transform`,
+  `SetState`, `Startup` — legitimately carry no project script, exactly as
+  M1-Build treats them).
 
 ## Build
 

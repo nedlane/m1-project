@@ -744,6 +744,177 @@ pub fn set_call_rate(xml: &str, script: &str, rate: &str) -> Result<String, Edit
     set_props_attr(xml, script, "SelectedTrigger", &trigger)
 }
 
+/// Set (or replace) a component's physical **Quantity** (`<Props Qty="…">`) — the
+/// dimension M1-Build shows in the *Value → Quantity* row (e.g. `ratio`, `rad/s`,
+/// `Hz`). This is distinct from the display *unit* (`set_unit` → `<Default Unit>`);
+/// the quantity is the underlying physical kind, the unit a way of displaying it.
+pub fn set_quantity(xml: &str, component: &str, qty: &str) -> Result<String, EditError> {
+    if qty.trim().is_empty() {
+        return Err(EditError::Invalid("quantity must not be empty".into()));
+    }
+    set_props_attr(xml, component, "Qty", qty)
+}
+
+/// Set the *Validation* of a value component (the M1-Build *Validation* section).
+/// `kind` is `MinMax` (then `min`/`max` are required) or `None`/`none` (clears the
+/// `Validation`/`ValMin`/`ValMax` attributes). Bounds are written in the
+/// `%.17e` form M1-Build uses (see `format_motec_float`).
+pub fn set_validation(
+    xml: &str,
+    component: &str,
+    kind: &str,
+    min: Option<f64>,
+    max: Option<f64>,
+) -> Result<String, EditError> {
+    match kind {
+        "None" | "none" => {
+            let mut out = remove_props_attr(xml, component, "Validation")?;
+            out = remove_props_attr(&out, component, "ValMin")?;
+            out = remove_props_attr(&out, component, "ValMax")?;
+            Ok(out)
+        }
+        "MinMax" => {
+            let min = min.ok_or_else(|| {
+                EditError::Invalid("MinMax validation needs --min and --max".into())
+            })?;
+            let max = max.ok_or_else(|| {
+                EditError::Invalid("MinMax validation needs --min and --max".into())
+            })?;
+            if min > max {
+                return Err(EditError::Invalid(format!(
+                    "validation min ({min}) must not exceed max ({max})"
+                )));
+            }
+            // `set_props_attr` prepends a freshly-added attribute right after
+            // `<Props`, so insert in reverse (ValMax, ValMin, Validation) to leave
+            // the triple reading `Validation ValMin ValMax` left-to-right as
+            // M1-Build writes it. (A pre-existing attribute is replaced in place,
+            // so re-running keeps the order.)
+            let mut out = set_props_attr(xml, component, "ValMax", &format_motec_float(max))?;
+            out = set_props_attr(&out, component, "ValMin", &format_motec_float(min))?;
+            out = set_props_attr(&out, component, "Validation", "MinMax")?;
+            Ok(out)
+        }
+        other => Err(EditError::Invalid(format!(
+            "unknown validation type `{other}`; valid: MinMax, None"
+        ))),
+    }
+}
+
+/// Format a bound the way M1-Build serialises `ValMin`/`ValMax`: C `%.17e` —
+/// a single mantissa digit, 17 fractional digits, lowercase `e`, an explicit
+/// sign and a ≥2-digit exponent (`1.00000000000000000e+00`). M1 re-reads the
+/// value as the same `f64` regardless, but matching the form keeps diffs clean.
+pub(crate) fn format_motec_float(v: f64) -> String {
+    let s = format!("{v:.17e}"); // e.g. "1.00000000000000000e0", "5.00000000000000000e-1"
+    let (mantissa, exp) = s.split_once('e').unwrap_or((s.as_str(), "0"));
+    let (sign, digits) = match exp.strip_prefix('-') {
+        Some(d) => ('-', d),
+        None => ('+', exp.strip_prefix('+').unwrap_or(exp)),
+    };
+    format!("{mantissa}e{sign}{digits:0>2}")
+}
+
+/// Add a user **Tag** to a component (`<Props><List.UserTags><Entry Value="tag"/>`).
+/// This is the *Tags* row in M1-Build's Properties; a component missing a tag its
+/// class requires is what M1-Build's *Validate Project* reports as
+/// "Mandatory tag not selected". Creates `<Props>` and/or `<List.UserTags>` as
+/// needed; idempotent (a tag already present leaves the file unchanged).
+pub fn add_tag(xml: &str, component: &str, tag: &str) -> Result<String, EditError> {
+    if tag.trim().is_empty() {
+        return Err(EditError::Invalid("tag must not be empty".into()));
+    }
+    let xml = ensure_props(xml, component)?;
+    if user_tags(&xml, component)?.iter().any(|t| t == tag) {
+        return Ok(xml); // already present
+    }
+    let entry = format!("<Entry Value=\"{}\"/>", xml_escape(tag));
+
+    // A <List.UserTags> already exists: append the entry inside it, on its own
+    // line one space deeper than the element — M1-Build's serialiser puts every
+    // <Entry> on its own line (see any List.UserTags in a real project).
+    if let Some(range) = user_tags_range(&xml, component)? {
+        let indent = indent_at(&xml, range.start).to_string();
+        let text = &xml[range.clone()];
+        let new = if props_self_closing(text) {
+            let open = text
+                .trim_end()
+                .strip_suffix("/>")
+                .expect("checked by props_self_closing");
+            format!("{open}>\n{indent} {entry}\n{indent}</List.UserTags>")
+        } else {
+            let close = text
+                .rfind("</List.UserTags>")
+                .ok_or_else(|| EditError::Invalid("malformed <List.UserTags>".into()))?;
+            format!(
+                "{}\n{indent} {entry}\n{indent}{}",
+                text[..close].trim_end(),
+                &text[close..]
+            )
+        };
+        return Ok(splice(&xml, range, &new));
+    }
+
+    // No <List.UserTags> yet: add one inside <Props>, nested one space per level
+    // at the <Props> indentation (M1-Build's layout).
+    let loc = locate(&xml, component)?;
+    let props_range = loc.props_range.expect("ensure_props guarantees <Props>");
+    let pindent = indent_at(&xml, props_range.start).to_string();
+    let props_text = &xml[props_range.clone()];
+    let block =
+        format!("\n{pindent} <List.UserTags>\n{pindent}  {entry}\n{pindent} </List.UserTags>");
+    let new_props = if props_self_closing(props_text) {
+        let open = props_text
+            .trim_end()
+            .strip_suffix("/>")
+            .expect("checked by props_self_closing");
+        format!("{open}>{block}\n{pindent}</Props>")
+    } else {
+        let close = props_text
+            .rfind("</Props>")
+            .ok_or_else(|| EditError::Invalid("malformed <Props>".into()))?;
+        format!(
+            "{}{block}\n{pindent}{}",
+            props_text[..close].trim_end(),
+            &props_text[close..]
+        )
+    };
+    Ok(splice(&xml, props_range, &new_props))
+}
+
+/// Remove a user tag from a component. Errors if the component does not carry that
+/// tag. When the last tag is removed, the now-empty `<List.UserTags>` element is
+/// dropped entirely (its whole line, if it was on its own line).
+pub fn remove_tag(xml: &str, component: &str, tag: &str) -> Result<String, EditError> {
+    let tags = user_tags(xml, component)?;
+    if !tags.iter().any(|t| t == tag) {
+        return Err(EditError::Invalid(format!(
+            "`{component}` has no user tag `{tag}`"
+        )));
+    }
+    let range = user_tags_range(xml, component)?
+        .ok_or_else(|| EditError::Invalid("no <List.UserTags> to edit".into()))?;
+    let remaining: Vec<String> = tags.into_iter().filter(|t| t != tag).collect();
+    if remaining.is_empty() {
+        // Drop the whole element, consuming its leading indentation+newline if it
+        // sits on its own line (inline → just the element).
+        let start = line_extended_start(xml, range.start);
+        return Ok(splice(xml, start..range.end, ""));
+    }
+    // Rewrite the surviving entries one per line, one space deeper than the
+    // element (M1-Build's serialiser layout — same as `add_tag`).
+    let indent = indent_at(xml, range.start).to_string();
+    let entries: String = remaining
+        .iter()
+        .map(|t| format!("\n{indent} <Entry Value=\"{}\"/>", xml_escape(t)))
+        .collect();
+    Ok(splice(
+        xml,
+        range,
+        &format!("<List.UserTags>{entries}\n{indent}</List.UserTags>"),
+    ))
+}
+
 pub(crate) fn validate_security(s: &str) -> Result<(), EditError> {
     if SECURITY_LEVELS.contains(&s) {
         Ok(())

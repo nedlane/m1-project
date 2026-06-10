@@ -105,6 +105,69 @@ pub(crate) fn set_props_attr(
     Ok(splice(&xml, insert_at..insert_at, &frag))
 }
 
+/// Remove an attribute (` attr="value"`, leading space included) from a
+/// component's `<Props>` opening tag, located via the parser so the splice can
+/// never land inside another attribute's quoted value. No-op (returns the input
+/// unchanged) if there is no `<Props>` or the attribute is absent.
+pub(crate) fn remove_props_attr(
+    xml: &str,
+    component: &str,
+    attr: &str,
+) -> Result<String, EditError> {
+    let range = {
+        let doc = parse_xml(xml)?;
+        let comp = parse_and_find(&doc, component)?;
+        comp.children()
+            .find(|c| c.has_tag_name("Props"))
+            .and_then(|p| p.attribute_node(attr))
+            .map(|a| a.range())
+    };
+    let Some(r) = range else {
+        return Ok(xml.to_string());
+    };
+    // `Attribute::range()` spans `attr="value"`; also consume the single space
+    // that separates it from the previous attribute / tag name.
+    let start = if xml[..r.start].ends_with(' ') {
+        r.start - 1
+    } else {
+        r.start
+    };
+    Ok(splice(xml, start..r.end, ""))
+}
+
+/// The `<Entry Value="…">` user tags on this component's
+/// `<Props><List.UserTags>`, in document order (empty if there is no such block).
+pub(crate) fn user_tags(xml: &str, component: &str) -> Result<Vec<String>, EditError> {
+    let doc = parse_xml(xml)?;
+    let comp = parse_and_find(&doc, component)?;
+    Ok(comp
+        .children()
+        .find(|c| c.has_tag_name("Props"))
+        .and_then(|p| p.children().find(|c| c.has_tag_name("List.UserTags")))
+        .map(|tags| {
+            tags.children()
+                .filter(|e| e.has_tag_name("Entry"))
+                .filter_map(|e| e.attribute("Value"))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// The byte range of this component's `<Props><List.UserTags>` element, if present.
+pub(crate) fn user_tags_range(
+    xml: &str,
+    component: &str,
+) -> Result<Option<std::ops::Range<usize>>, EditError> {
+    let doc = parse_xml(xml)?;
+    let comp = parse_and_find(&doc, component)?;
+    Ok(comp
+        .children()
+        .find(|c| c.has_tag_name("Props"))
+        .and_then(|p| p.children().find(|c| c.has_tag_name("List.UserTags")))
+        .map(|n| n.range()))
+}
+
 /// Ensure the component has a `<Props>` child; if it is `<Component …/>`
 /// (self-closing) rewrite it to `<Component …><Props/></Component>`.
 pub(crate) fn ensure_props(xml: &str, component: &str) -> Result<String, EditError> {
