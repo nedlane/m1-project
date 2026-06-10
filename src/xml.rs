@@ -1,0 +1,214 @@
+//! Low-level XML location and splicing helpers shared by every edit:
+//! byte-accurate `roxmltree` lookups (`locate`/`parse_and_find`), the splice
+//! primitives (`splice`/`xml_escape`/`indent_at`) and the `<Props>` attribute
+//! machinery (`set_props_attr`/`ensure_props`/`props_*`/`default_unit_*`).
+
+use crate::EditError;
+
+/// Parse `xml` into a `roxmltree::Document`, mapping a parse failure to
+/// [`EditError::Xml`] with the same message every call site used.
+pub(crate) fn parse_xml(xml: &str) -> Result<roxmltree::Document<'_>, EditError> {
+    roxmltree::Document::parse(xml).map_err(|e| EditError::Xml(e.to_string()))
+}
+
+/// Find the `<Component>` whose `Name` is `component` in an already-parsed `doc`,
+/// erroring with [`EditError::NoSuchComponent`] if absent. The caller owns `doc`
+/// so the returned `Node` (which borrows it) stays valid — see the LIFETIME NOTE
+/// above for why the `Document` is not created/returned here.
+pub(crate) fn parse_and_find<'a, 'd>(
+    doc: &'d roxmltree::Document<'a>,
+    component: &str,
+) -> Result<roxmltree::Node<'d, 'a>, EditError> {
+    doc.descendants()
+        .find(|n| {
+            n.has_tag_name("Component")
+                && n.has_attribute("Classname")
+                && n.attribute("Name") == Some(component)
+        })
+        .ok_or_else(|| EditError::NoSuchComponent(component.to_string()))
+}
+
+/// A located component: its name, class, byte range of the whole `<Component>`
+/// element, and the byte range of its `<Props>` child if present.
+pub(crate) struct Located {
+    pub(crate) classname: String,
+    pub(crate) range: std::ops::Range<usize>,
+    pub(crate) props_range: Option<std::ops::Range<usize>>,
+}
+
+/// Find a component by its fully-qualified `Name`, returning its layout.
+pub(crate) fn locate(xml: &str, name: &str) -> Result<Located, EditError> {
+    let doc = parse_xml(xml)?;
+    let node = parse_and_find(&doc, name)?;
+    let props_range = node
+        .children()
+        .find(|c| c.has_tag_name("Props"))
+        .map(|p| p.range());
+    Ok(Located {
+        classname: node.attribute("Classname").unwrap_or("").to_string(),
+        range: node.range(),
+        props_range,
+    })
+}
+
+/// True if a component with this exact `Name` exists (only considers real components
+/// that carry a `Classname` attribute, excluding `<Organisation>` view-only nodes).
+pub(crate) fn exists(xml: &str, name: &str) -> Result<bool, EditError> {
+    let doc = parse_xml(xml)?;
+    Ok(doc.descendants().any(|n| {
+        n.has_tag_name("Component")
+            && n.has_attribute("Classname")
+            && n.attribute("Name") == Some(name)
+    }))
+}
+
+/// The leading whitespace (indentation) of the line containing byte `pos`.
+pub(crate) fn indent_at(xml: &str, pos: usize) -> &str {
+    let line_start = xml[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let rest = &xml[line_start..];
+    let end = rest
+        .find(|c: char| c != ' ' && c != '\t')
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// The parent path of a dotted name (`Root.A.B` -> `Root.A`), or `None` for a
+/// single segment.
+pub(crate) fn parent_of(name: &str) -> Option<&str> {
+    name.rfind('.').map(|i| &name[..i])
+}
+
+/// Set/replace an attribute on a component's `<Props>`, creating `<Props>` if absent.
+pub(crate) fn set_props_attr(
+    xml: &str,
+    component: &str,
+    attr: &str,
+    value: &str,
+) -> Result<String, EditError> {
+    let xml = ensure_props(xml, component)?;
+
+    // Replace the attribute's value, located precisely via the XML parser so the
+    // range is the real value and never a false text match inside another
+    // attribute's quoted value (which spliced across attribute boundaries and
+    // wrote not-well-formed XML while reporting success) (#5).
+    if let Some(vr) = props_attr_value_range(&xml, component, attr)? {
+        return Ok(splice(&xml, vr, &xml_escape(value)));
+    }
+
+    // Attribute absent: insert ` attr="value"` immediately after the `<Props`
+    // tag name. Valid whether or not the tag already has attributes and whether
+    // it is self-closing (`<Props/>` -> `<Props attr="…"/>`).
+    let loc = locate(&xml, component)?;
+    let props_range = loc.props_range.expect("ensure_props guarantees <Props>");
+    let insert_at = props_range.start + "<Props".len();
+    let frag = format!(" {attr}=\"{}\"", xml_escape(value));
+    Ok(splice(&xml, insert_at..insert_at, &frag))
+}
+
+/// Ensure the component has a `<Props>` child; if it is `<Component …/>`
+/// (self-closing) rewrite it to `<Component …><Props/></Component>`.
+pub(crate) fn ensure_props(xml: &str, component: &str) -> Result<String, EditError> {
+    let loc = locate(xml, component)?;
+    if loc.props_range.is_some() {
+        return Ok(xml.to_string());
+    }
+    let elem = &xml[loc.range.clone()];
+    let indent = indent_at(xml, loc.range.start).to_string();
+    if elem.trim_end().ends_with("/>") {
+        let open = elem
+            .trim_end()
+            .strip_suffix("/>")
+            .expect("checked by ends_with(\"/>\") above");
+        let new = format!("{open}>\n{indent} <Props/>\n{indent}</Component>");
+        Ok(splice(xml, loc.range, &new))
+    } else {
+        // Has children but no <Props>: insert <Props/> right after the open tag.
+        let open_end = elem
+            .find('>')
+            .ok_or_else(|| EditError::Invalid("malformed <Component>".into()))?;
+        let abs = loc.range.start + open_end + 1;
+        let frag = format!("\n{indent} <Props/>");
+        Ok(splice(xml, abs..abs, &frag))
+    }
+}
+
+pub(crate) fn props_self_closing(props_text: &str) -> bool {
+    props_text.trim_end().ends_with("/>")
+}
+
+/// The byte range (in `xml`) of the value of `attr` on the target component's
+/// `<Props>` opening tag, located via the XML parser. `roxmltree`'s
+/// `range_value()` is the exact span between the quotes, so the replace can never
+/// land inside another attribute's quoted value (#5).
+pub(crate) fn props_attr_value_range(
+    xml: &str,
+    component: &str,
+    attr: &str,
+) -> Result<Option<std::ops::Range<usize>>, EditError> {
+    let doc = parse_xml(xml)?;
+    let comp = parse_and_find(&doc, component)?;
+    Ok(comp
+        .children()
+        .find(|c| c.has_tag_name("Props"))
+        .and_then(|p| p.attribute_node(attr))
+        .map(|a| a.range_value()))
+}
+
+/// The byte range of the `Unit` value on this component's `<Default>` element —
+/// the real display unit (`<Props><Locale><Default Unit="…"/>`) — located via the
+/// XML parser so a `Unit="…"` in a comment or a non-`Default` element is ignored
+/// rather than mutated (#7).
+pub(crate) fn default_unit_value_range(
+    xml: &str,
+    component: &str,
+) -> Result<Option<std::ops::Range<usize>>, EditError> {
+    let doc = parse_xml(xml)?;
+    let comp = parse_and_find(&doc, component)?;
+    Ok(comp
+        .children()
+        .find(|c| c.has_tag_name("Props"))
+        .and_then(|props| {
+            props
+                .descendants()
+                .find(|d| d.has_tag_name("Default") && d.has_attribute("Unit"))
+        })
+        .and_then(|d| d.attribute_node("Unit"))
+        .map(|a| a.range_value()))
+}
+
+/// The byte offset just after the `<Default` tag name of this component's
+/// existing `<Props><Locale><Default …>` element that has **no** `Unit`
+/// attribute yet — the point to splice ` Unit="…"` into. `None` if there is no
+/// such `<Default>` (so the caller falls back to creating the whole `<Locale>`).
+pub(crate) fn default_unit_insert_point(
+    xml: &str,
+    component: &str,
+) -> Result<Option<usize>, EditError> {
+    let doc = parse_xml(xml)?;
+    let comp = parse_and_find(&doc, component)?;
+    Ok(comp
+        .children()
+        .find(|c| c.has_tag_name("Props"))
+        .and_then(|props| {
+            props
+                .descendants()
+                .find(|d| d.has_tag_name("Default") && !d.has_attribute("Unit"))
+        })
+        // node.range() spans the whole element; insert right after `<Default`.
+        .map(|d| d.range().start + "<Default".len()))
+}
+
+pub(crate) fn splice(s: &str, range: std::ops::Range<usize>, replacement: &str) -> String {
+    let mut out = String::with_capacity(s.len() - (range.end - range.start) + replacement.len());
+    out.push_str(&s[..range.start]);
+    out.push_str(replacement);
+    out.push_str(&s[range.end..]);
+    out
+}
+
+pub(crate) fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
