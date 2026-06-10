@@ -217,13 +217,14 @@ pub(crate) fn props_attr_value_range(
         .map(|a| a.range_value()))
 }
 
-/// The byte range of the `Unit` value on this component's `<Default>` element —
-/// the real display unit (`<Props><Locale><Default Unit="…"/>`) — located via the
-/// XML parser so a `Unit="…"` in a comment or a non-`Default` element is ignored
-/// rather than mutated (#7).
-pub(crate) fn default_unit_value_range(
+/// The byte range of `attr`'s value on this component's `<Default>` element
+/// (`<Props><Locale><Default attr="…"/>`) — the Display-section fields Unit,
+/// Format, DPS, Min, Max — located via the XML parser so an `attr="…"` in a
+/// comment or a non-`Default` element is ignored rather than mutated (#7).
+pub(crate) fn default_attr_value_range(
     xml: &str,
     component: &str,
+    attr: &str,
 ) -> Result<Option<std::ops::Range<usize>>, EditError> {
     let doc = parse_xml(xml)?;
     let comp = parse_and_find(&doc, component)?;
@@ -233,19 +234,20 @@ pub(crate) fn default_unit_value_range(
         .and_then(|props| {
             props
                 .descendants()
-                .find(|d| d.has_tag_name("Default") && d.has_attribute("Unit"))
+                .find(|d| d.has_tag_name("Default") && d.has_attribute(attr))
         })
-        .and_then(|d| d.attribute_node("Unit"))
+        .and_then(|d| d.attribute_node(attr))
         .map(|a| a.range_value()))
 }
 
 /// The byte offset just after the `<Default` tag name of this component's
-/// existing `<Props><Locale><Default …>` element that has **no** `Unit`
-/// attribute yet — the point to splice ` Unit="…"` into. `None` if there is no
+/// existing `<Props><Locale><Default …>` element that has **no** `attr`
+/// attribute yet — the point to splice ` attr="…"` into. `None` if there is no
 /// such `<Default>` (so the caller falls back to creating the whole `<Locale>`).
-pub(crate) fn default_unit_insert_point(
+pub(crate) fn default_attr_insert_point(
     xml: &str,
     component: &str,
+    attr: &str,
 ) -> Result<Option<usize>, EditError> {
     let doc = parse_xml(xml)?;
     let comp = parse_and_find(&doc, component)?;
@@ -255,7 +257,7 @@ pub(crate) fn default_unit_insert_point(
         .and_then(|props| {
             props
                 .descendants()
-                .find(|d| d.has_tag_name("Default") && !d.has_attribute("Unit"))
+                .find(|d| d.has_tag_name("Default") && !d.has_attribute(attr))
         })
         // node.range() spans the whole element; insert right after `<Default`.
         .map(|d| d.range().start + "<Default".len()))

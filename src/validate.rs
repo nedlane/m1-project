@@ -48,6 +48,8 @@ impl fmt::Display for Finding {
 ///    view is a warning).
 /// 5. Every scheduled function (`BuiltIn.FuncUser`) has an event/trigger selected
 ///    (mirrors M1-Build's "no event selected" — such a function never runs).
+/// 6. Every value component (`BuiltIn.Channel`/`BuiltIn.Parameter`) has a
+///    `<Props Security>` (mirrors M1-Build Error 1601 "No security group selected").
 pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
     let doc = parse_xml(xml)?;
     let mut findings: Vec<Finding> = Vec::new();
@@ -227,6 +229,40 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                 message:
                     "scheduled function has no event selected (SelectedTrigger) — it will never run"
                         .into(),
+            });
+        }
+    }
+
+    // Check 6: a value component (Channel/Parameter) with no security group.
+    // M1-Build requires every channel/parameter to have a Security level and
+    // reports "No security group selected" (Error 1601) otherwise. Verified safe:
+    // all 737 channels/parameters in the real AV-M1 project carry a `Security` and
+    // M1-Build reports 0 errors; a freshly-inserted bare one is flagged (exactly
+    // what `create-channel`/`create-parameter` produce until `set-security`).
+    for n in doc
+        .descendants()
+        .filter(|n| n.has_tag_name("Component"))
+        .filter(|n| {
+            matches!(
+                n.attribute("Classname"),
+                Some("BuiltIn.Channel") | Some("BuiltIn.Parameter")
+            )
+        })
+    {
+        let Some(owner) = n.attribute("Name") else {
+            continue;
+        };
+        let has_security = n
+            .children()
+            .find(|c| c.has_tag_name("Props"))
+            .and_then(|p| p.attribute("Security"))
+            .is_some();
+        if !has_security {
+            findings.push(Finding {
+                level: FindingLevel::Error,
+                path: owner.to_string(),
+                message: "no security group selected — a channel/parameter needs a Security level"
+                    .into(),
             });
         }
     }

@@ -35,6 +35,9 @@ m1-project set-type       --project <p> --component <Root.X> --type <type>
 m1-project set-unit       --project <p> --component <Root.X> --unit <unit>
 m1-project set-quantity   --project <p> --component <Root.X> --quantity <ratio|rad/s|…>
 m1-project set-validation --project <p> --component <Root.X> [--type MinMax --min <f> --max <f> | --type None]
+m1-project set-format     --project <p> --component <Root.X> --format <Hex|Default|…>
+m1-project set-dps        --project <p> --component <Root.X> --dps <N>
+m1-project set-display-range --project <p> --component <Root.X> --min <f> --max <f>
 m1-project add-tag        --project <p> --component <Root.X> --tag <Tag>
 m1-project remove-tag     --project <p> --component <Root.X> --tag <Tag>
 m1-project set-call-rate  --project <p> --script <Root.Group.Script> --rate <N|startup>
@@ -80,6 +83,9 @@ Global flags: `--dry-run` (print the modified project to stdout, don't write) an
     *Invalid display unit* (Error 1017).
   - `set-validation` → `<Props Validation="MinMax" ValMin=… ValMax=…>` (bounds in
     M1-Build's `%.17e` form), or `--type None` to clear all three.
+  - `set-format` / `set-dps` / `set-display-range` → the *Display* section
+    `<Locale><Default Format=… DPS=… Min=… Max=…>` (Min/Max in `%.17e`; these are
+    the display clamp, distinct from the Validation `ValMin`/`ValMax`).
   - `add-tag` / `remove-tag` → `<Props><List.UserTags><Entry Value="Tag"/></List.UserTags>`,
     the *Tags* row. A component missing a tag its class requires is M1-Build's
     most common finding, *Mandatory tag not selected* (Warning 1142/1549);
@@ -90,12 +96,16 @@ Global flags: `--dry-run` (print the modified project to stdout, don't write) an
   `SelectedTrigger` resolving to a real `BuiltIn.EventKernel` clock (`$(…)`
   expression triggers are skipped), `<List>`/`<Organisation>` consistency, and —
   mirroring M1-Build — a scheduled function (`BuiltIn.FuncUser`) with **no event
-  selected** (Error, = M1-Build Error 1623). The CLI additionally does one
+  selected** (Error, = M1-Build Error 1623) and a channel/parameter with **no
+  security group** (Error, = M1-Build Error 1601). The CLI additionally does one
   file-aware check: a script component whose backing `.m1scr` **exists but is
   empty** is *missing code* (= M1-Build Error 1024); an *absent* `.m1scr` is not a
   finding (many library/base method slots — `Calculation`, `Transform`,
   `SetState`, `Startup` — legitimately carry no project script, exactly as
-  M1-Build treats them).
+  M1-Build treats them). Not yet mirrored (they need cross-script dataflow or a
+  unit-dimension model, so they belong in `m1-typecheck`): *channel value not
+  assigned* (1627), *parameter value not read* (1631), *invalid display unit*
+  (1017).
 
 ## Build
 

@@ -156,11 +156,40 @@ enum Command {
         #[arg(long, value_name = "TYPE", default_value = "MinMax")]
         r#type: String,
         /// Lower bound (required for MinMax).
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         min: Option<f64>,
         /// Upper bound (required for MinMax).
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         max: Option<f64>,
+    },
+    /// Set a component's display format (`<Default Format>`, e.g. `Hex`, `Default`).
+    SetFormat {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        component: String,
+        #[arg(long)]
+        format: String,
+    },
+    /// Set a component's decimal places (`<Default DPS>`).
+    SetDps {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        component: String,
+        #[arg(long)]
+        dps: u32,
+    },
+    /// Set a component's display Min/Max (`<Default Min/Max>`; distinct from validation).
+    SetDisplayRange {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        component: String,
+        #[arg(long, allow_hyphen_values = true)]
+        min: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        max: f64,
     },
     /// Add a user tag to a component (the *Tags* row; fixes "Mandatory tag not selected").
     AddTag {
@@ -229,6 +258,9 @@ impl Command {
             | Command::SetUnit { project, .. }
             | Command::SetQuantity { project, .. }
             | Command::SetValidation { project, .. }
+            | Command::SetFormat { project, .. }
+            | Command::SetDps { project, .. }
+            | Command::SetDisplayRange { project, .. }
             | Command::AddTag { project, .. }
             | Command::RemoveTag { project, .. }
             | Command::SetCallRate { project, .. }
@@ -427,6 +459,16 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             max,
             ..
         } => m1_project::set_validation(&xml, component, r#type, *min, *max)?,
+        SetFormat {
+            component, format, ..
+        } => m1_project::set_format(&xml, component, format)?,
+        SetDps { component, dps, .. } => m1_project::set_dps(&xml, component, *dps)?,
+        SetDisplayRange {
+            component,
+            min,
+            max,
+            ..
+        } => m1_project::set_display_range(&xml, component, *min, *max)?,
         AddTag { component, tag, .. } => m1_project::add_tag(&xml, component, tag)?,
         RemoveTag { component, tag, .. } => m1_project::remove_tag(&xml, component, tag)?,
         SetCallRate { script, rate, .. } => m1_project::set_call_rate(&xml, script, rate)?,

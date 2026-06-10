@@ -656,49 +656,95 @@ pub fn set_type(xml: &str, component: &str, ty: &str) -> Result<String, EditErro
 
 /// Set (or replace) a component's display unit (`<Props><Locale><Default Unit>`).
 pub fn set_unit(xml: &str, component: &str, unit: &str) -> Result<String, EditError> {
-    // Ensure a <Props> exists, then set the Locale/Default unit inside it.
+    set_default_attr(xml, component, "Unit", unit)
+}
+
+/// Set (or replace) a component's display **Format** (`<Default Format>`, e.g.
+/// `Hex`, `Default`) — the M1-Build *Display → Format* row.
+pub fn set_format(xml: &str, component: &str, format: &str) -> Result<String, EditError> {
+    if format.trim().is_empty() {
+        return Err(EditError::Invalid("format must not be empty".into()));
+    }
+    set_default_attr(xml, component, "Format", format)
+}
+
+/// Set (or replace) a component's decimal places (`<Default DPS>`) — the
+/// *Display → DPS* row. `dps` is a non-negative integer.
+pub fn set_dps(xml: &str, component: &str, dps: u32) -> Result<String, EditError> {
+    set_default_attr(xml, component, "DPS", &dps.to_string())
+}
+
+/// Set a component's display **Min/Max** (`<Default Min=… Max=…>`, in M1-Build's
+/// `%.17e` form) — the *Display → Minimum/Maximum* rows. These are the display
+/// clamp, distinct from the *Validation* `ValMin`/`ValMax` (see [`set_validation`]).
+pub fn set_display_range(
+    xml: &str,
+    component: &str,
+    min: f64,
+    max: f64,
+) -> Result<String, EditError> {
+    if min > max {
+        return Err(EditError::Invalid(format!(
+            "display min ({min}) must not exceed max ({max})"
+        )));
+    }
+    let out = set_default_attr(xml, component, "Min", &format_motec_float(min))?;
+    set_default_attr(&out, component, "Max", &format_motec_float(max))
+}
+
+/// Set (or replace) an attribute on a value component's `<Props><Locale><Default>`
+/// element — the Display-section fields (Unit/Format/DPS/Min/Max). Creates the
+/// `<Props>`/`<Locale>`/`<Default>` chain as needed; reuses an existing
+/// `<Default>` (so a sibling DPS/Format/unit is never orphaned by a duplicate
+/// `<Locale>`).
+fn set_default_attr(
+    xml: &str,
+    component: &str,
+    attr: &str,
+    value: &str,
+) -> Result<String, EditError> {
     let xml = ensure_props(xml, component)?;
 
-    // Replace the value of the *real* display unit — the `Unit` attribute on the
-    // `<Default>` element — located via the XML parser. A plain text scan of the
-    // whole <Props> subtree would also match a `Unit="…"` in a comment or an
-    // unrelated child element and mutate that instead, silently (#7).
-    if let Some(u_range) = default_unit_value_range(&xml, component)? {
-        return Ok(splice(&xml, u_range, &xml_escape(unit)));
+    // Replace the value of the real `<Default attr>`, located via the XML parser
+    // so a match inside a comment or an unrelated element is never mutated (#7).
+    if let Some(v_range) = default_attr_value_range(&xml, component, attr)? {
+        return Ok(splice(&xml, v_range, &xml_escape(value)));
     }
 
-    // A `<Default>` may already exist carrying other attributes but no `Unit`
-    // (the corpus is full of `<Default DPS="3"/>` / `<Default Min Max/>`). Add
-    // the `Unit` to *that* element rather than appending a whole second
-    // `<Locale>`, which would duplicate the element and orphan its DPS/format.
-    if let Some(insert_at) = default_unit_insert_point(&xml, component)? {
-        let frag = format!(" Unit=\"{}\"", xml_escape(unit));
+    // A `<Default>` may already exist carrying other attributes but not this one
+    // (the corpus is full of `<Default Unit="%" DPS="2"/>`). Add the attribute to
+    // *that* element rather than appending a second `<Locale>`, which would
+    // duplicate the element and orphan its siblings.
+    if let Some(insert_at) = default_attr_insert_point(&xml, component, attr)? {
+        let frag = format!(" {attr}=\"{}\"", xml_escape(value));
         return Ok(splice(&xml, insert_at..insert_at, &frag));
     }
 
     let loc = locate(&xml, component)?;
     let props_range = loc.props_range.expect("ensure_props guarantees <Props>");
+    let pindent = indent_at(&xml, props_range.start).to_string();
     let props_text = &xml[props_range.clone()];
 
+    // M1-Build's serialiser nests one space per level with every element on its
+    // own line (same layout as `add_tag`'s `<List.UserTags>`).
+    let block = format!(
+        "\n{pindent} <Locale>\n{pindent}  <Default {attr}=\"{}\"/>\n{pindent} </Locale>",
+        xml_escape(value)
+    );
     let new_props = if props_self_closing(props_text) {
-        // `<Props …/>` -> `<Props …><Locale><Default Unit="…"/></Locale></Props>`.
-        let open = props_text.trim_end();
-        let open = open
+        let open = props_text
+            .trim_end()
             .strip_suffix("/>")
             .expect("checked by props_self_closing above");
-        format!(
-            "{open}><Locale><Default Unit=\"{}\"/></Locale></Props>",
-            xml_escape(unit)
-        )
+        format!("{open}>{block}\n{pindent}</Props>")
     } else {
         // `<Props …> … </Props>` — insert the Locale just before `</Props>`.
         let close_idx = props_text
             .rfind("</Props>")
             .ok_or_else(|| EditError::Invalid("malformed <Props>".into()))?;
         format!(
-            "{}<Locale><Default Unit=\"{}\"/></Locale>{}",
-            &props_text[..close_idx],
-            xml_escape(unit),
+            "{}{block}\n{pindent}{}",
+            props_text[..close_idx].trim_end(),
             &props_text[close_idx..]
         )
     };

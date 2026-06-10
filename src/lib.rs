@@ -19,6 +19,8 @@
 //! - [`set_type`] — set/replace a component's storage `Type`.
 //! - [`set_quantity`] — set/replace a component's physical quantity (`<Props Qty>`).
 //! - [`set_validation`] — set/clear a value component's `Validation`/`ValMin`/`ValMax`.
+//! - [`set_format`]/[`set_dps`]/[`set_display_range`] — the Display-section
+//!   `<Default>` fields (Format, DPS, Min/Max).
 //! - [`add_tag`]/[`remove_tag`] — manage a component's `<List.UserTags>` (the *Tags* row).
 //! - [`set_call_rate`] — point a script's `SelectedTrigger` at an `On <N>Hz` clock.
 //! - [`validate`] — read-only check for structural violations.
@@ -80,7 +82,8 @@ mod xml;
 pub use edits::{
     ScriptRename, add_tag, create_channel, create_function, create_group, create_parameter,
     create_scheduled_function, delete_component, remove_tag, rename_component, script_relpath,
-    set_call_rate, set_quantity, set_security, set_type, set_unit, set_validation,
+    set_call_rate, set_display_range, set_dps, set_format, set_quantity, set_security, set_type,
+    set_unit, set_validation,
 };
 pub use query::{
     ComponentEntry, ScriptComponent, available_rates, list_components, resolve_trigger,
@@ -536,21 +539,45 @@ mod tests {
     #[test]
     fn validate_clean_project() {
         let findings = validate(PRJ).unwrap();
-        // PRJ has no SelectedTriggers, no duplicates → no findings.
+        // PRJ's only structural gap is the deliberately-bare `Root.Engine.Plain`
+        // channel, which Check 6 flags for a missing Security group (= M1-Build
+        // Error 1601). No OTHER findings (no bad triggers, no duplicates).
         assert!(
-            findings.is_empty(),
-            "clean project should have no findings, got: {findings:?}"
+            findings
+                .iter()
+                .all(|f| f.path == "Root.Engine.Plain" && f.message.contains("security")),
+            "only the bare Plain channel should be flagged: {findings:?}"
         );
     }
 
     #[test]
     fn validate_with_valid_trigger() {
-        // Add a trigger and validate — should be clean.
+        // Add a trigger and validate — the trigger must pass; the only remaining
+        // finding is the bare Plain channel's missing Security (Check 6).
         let prj = set_call_rate(PRJ, "Root.Engine.Update", "100").unwrap();
         let findings = validate(&prj).unwrap();
         assert!(
-            findings.is_empty(),
-            "valid trigger should pass validate, got: {findings:?}"
+            findings.iter().all(|f| f.path == "Root.Engine.Plain"),
+            "a valid trigger must not be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_flags_channel_without_security() {
+        // Root.Engine.Plain is a bare channel with no <Props Security>.
+        let findings = validate(PRJ).unwrap();
+        assert!(
+            findings.iter().any(|f| f.path == "Root.Engine.Plain"
+                && f.level == FindingLevel::Error
+                && f.message.contains("security")),
+            "bare channel must be flagged for missing security: {findings:?}"
+        );
+        // A channel WITH security (Root.Engine.Speed) is not flagged.
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.path == "Root.Engine.Speed" && f.message.contains("security")),
+            "a channel with security must not be flagged: {findings:?}"
         );
     }
 
@@ -708,7 +735,16 @@ mod tests {
 
     #[test]
     fn create_channel_syncs_organisation() {
-        let out = create_channel(PRJ_ORG, "Root.Engine.Torque", Some("f32"), None, None).unwrap();
+        // Give it a security group so the result is a complete, clean component
+        // (Check 6 flags security-less channels — see create_channel_bare_…).
+        let out = create_channel(
+            PRJ_ORG,
+            "Root.Engine.Torque",
+            Some("f32"),
+            None,
+            Some("Tune"),
+        )
+        .unwrap();
         parses(&out);
         // Added to the List…
         assert!(out.contains(r#"Classname="BuiltIn.Channel" Name="Root.Engine.Torque""#));
@@ -845,12 +881,20 @@ mod tests {
             out[at..at + 200].contains("<Comment/>"),
             "bare channel should carry <Comment/>"
         );
-        assert!(validate(&out).unwrap().is_empty());
+        // Like an M1-Build UI insert, a bare channel has no security yet, so it is
+        // flagged (Error 1601) until `set-security` — and nothing else is wrong.
+        let findings = validate(&out).unwrap();
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.path == "Root.Engine.Bare" && f.message.contains("security")),
+            "only the missing-security finding expected: {findings:?}"
+        );
     }
 
     #[test]
     fn create_parameter_syncs_and_serialises() {
-        let out = create_parameter(PRJ_ORG, "Root.Engine.Gain", None, None, None).unwrap();
+        let out = create_parameter(PRJ_ORG, "Root.Engine.Gain", None, None, Some("Tune")).unwrap();
         parses(&out);
         assert!(
             out.contains(r#"<Component Classname="BuiltIn.Parameter" Name="Root.Engine.Gain">"#)
@@ -942,6 +986,50 @@ mod tests {
         ));
         assert!(matches!(
             set_validation(PRJ, "Root.Engine.Speed", "MinMax", Some(2.0), Some(1.0)),
+            Err(EditError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn set_format_dps_and_display_range_on_default() {
+        // Start from a channel with an existing <Default Unit> so we exercise the
+        // "add attr to existing <Default>" path and never duplicate <Locale>.
+        let base = set_unit(PRJ, "Root.Engine.Speed", "rpm").unwrap();
+        let out = set_format(&base, "Root.Engine.Speed", "Hex").unwrap();
+        let out = set_dps(&out, "Root.Engine.Speed", 2).unwrap();
+        let out = set_display_range(&out, "Root.Engine.Speed", -360.0, 360.0).unwrap();
+        parses(&out);
+        assert_eq!(out.matches("<Locale>").count(), 1, "single <Locale>");
+        assert_eq!(out.matches("<Default").count(), 1, "single <Default>");
+        assert!(out.contains(r#"Unit="rpm""#));
+        assert!(out.contains(r#"Format="Hex""#));
+        assert!(out.contains(r#"DPS="2""#));
+        assert!(out.contains(r#"Min="-3.60000000000000000e+02""#));
+        assert!(out.contains(r#"Max="3.60000000000000000e+02""#));
+        // Replacing a value keeps a single attribute.
+        let out2 = set_dps(&out, "Root.Engine.Speed", 4).unwrap();
+        assert!(out2.contains(r#"DPS="4""#) && !out2.contains(r#"DPS="2""#));
+        assert_eq!(out2.matches("DPS=").count(), 1);
+    }
+
+    #[test]
+    fn set_display_range_creates_default_chain_from_scratch() {
+        // Root.Engine.Plain has no <Props>; the whole chain must be built.
+        let out = set_display_range(PRJ, "Root.Engine.Plain", 0.0, 1.0).unwrap();
+        parses(&out);
+        assert!(
+            out.contains(
+                r#"<Default Min="0.00000000000000000e+00" Max="1.00000000000000000e+00"/>"#
+            ) || (out.contains(r#"Min="0.00000000000000000e+00""#)
+                && out.contains(r#"Max="1.00000000000000000e+00""#))
+        );
+        assert!(out.contains("<Locale>"));
+    }
+
+    #[test]
+    fn set_display_range_rejects_inverted() {
+        assert!(matches!(
+            set_display_range(PRJ, "Root.Engine.Speed", 5.0, 1.0),
             Err(EditError::Invalid(_))
         ));
     }

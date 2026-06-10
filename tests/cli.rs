@@ -17,7 +17,7 @@ fn minimal_project() -> &'static str {
    <List>\n\
     <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n\
     <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root.Engine\"/>\n\
-    <Component Classname=\"BuiltIn.Channel\" Name=\"Root.Engine.Speed\"/>\n\
+    <Component Classname=\"BuiltIn.Channel\" Name=\"Root.Engine.Speed\"><Props Security=\"Tune\"/></Component>\n\
     <Component Classname=\"BuiltIn.MethodUser\" Name=\"Root.Engine.Update\"/>\n\
     <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root.Events\"/>\n\
     <Component Classname=\"BuiltIn.EventKernel\" Name=\"Root.Events.On 100Hz\"/>\n\
