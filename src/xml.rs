@@ -198,6 +198,117 @@ pub(crate) fn default_unit_insert_point(
         .map(|d| d.range().start + "<Default".len()))
 }
 
+// ---- <Organisation> view-tree navigation ------------------------------------
+//
+// Each `<ComponentStream>` pairs a flat `<List>` of real components (every one
+// carrying a `Classname`) with a nested `<Organisation>` tree that mirrors the
+// hierarchy using **short** names (one `<Component Name="leaf">` per level, no
+// `Classname`). M1-Build binds each object's Properties through `<Organisation>`,
+// so a structural edit (create/delete/rename) that touches only `<List>` leaves
+// the two out of sync and M1-Build then refuses to load the project
+// ("Unable to find Properties for object 'Root.X'"). These helpers let the edits
+// keep `<Organisation>` consistent. Projects without any `<Organisation>` (e.g.
+// minimal/hand-written ones) simply yield `None` and the edits become no-ops on
+// the view tree.
+
+/// Walk an `<Organisation>` element by the short-name `segments` of a dotted path
+/// (`Root.CAN.EPOS` -> `["Root","CAN","EPOS"]`), returning the matching view node.
+fn walk_org<'a, 'd>(
+    org: roxmltree::Node<'d, 'a>,
+    segments: &[&str],
+) -> Option<roxmltree::Node<'d, 'a>> {
+    let mut cur = org;
+    for seg in segments {
+        cur = cur
+            .children()
+            .find(|c| c.has_tag_name("Component") && c.attribute("Name") == Some(*seg))?;
+    }
+    Some(cur)
+}
+
+/// A located view node: `(whole-element range, Name-attribute-value range)`.
+type OrgNodeRanges = (std::ops::Range<usize>, std::ops::Range<usize>);
+
+/// Locate the `<Organisation>` view node for component `path`, returning
+/// `(whole-element range, Name-attribute-value range)`. Searches every
+/// `<Organisation>` tree (a project may have one per `<ComponentStream>`).
+/// `Ok(None)` when there is no matching view node (no `<Organisation>` at all,
+/// or the path is absent from the view tree).
+pub(crate) fn org_locate(xml: &str, path: &str) -> Result<Option<OrgNodeRanges>, EditError> {
+    let doc = parse_xml(xml)?;
+    let segments: Vec<&str> = path.split('.').collect();
+    for org in doc.descendants().filter(|n| n.has_tag_name("Organisation")) {
+        if let Some(node) = walk_org(org, &segments) {
+            let name_value = node
+                .attribute_node("Name")
+                .map(|a| a.range_value())
+                .ok_or_else(|| EditError::Invalid("Organisation node lacks Name".into()))?;
+            return Ok(Some((node.range(), name_value)));
+        }
+    }
+    Ok(None)
+}
+
+/// Insert a `<Component Name="leaf"/>` view node as the last child of
+/// `parent_path`'s `<Organisation>` node, returning the rewritten XML. `Ok(None)`
+/// when there is no `<Organisation>` node for `parent_path` to extend (the edit
+/// then leaves the view tree untouched).
+pub(crate) fn org_insert_child(
+    xml: &str,
+    parent_path: &str,
+    leaf: &str,
+) -> Result<Option<String>, EditError> {
+    let (parent_range, _) = match org_locate(xml, parent_path)? {
+        Some(loc) => loc,
+        None => return Ok(None),
+    };
+    let parent_text = &xml[parent_range.clone()];
+    let parent_indent = indent_at(xml, parent_range.start).to_string();
+    // `<Organisation>` nests one space deeper per level throughout the corpus.
+    let child_indent = format!("{parent_indent} ");
+    let child = format!("\n{child_indent}<Component Name=\"{}\"/>", xml_escape(leaf));
+
+    if parent_text.trim_end().ends_with("/>") {
+        // Childless `<Component Name="X"/>` -> open it and nest the new child.
+        let open = parent_text
+            .trim_end()
+            .strip_suffix("/>")
+            .expect("checked by ends_with(\"/>\") above");
+        let new = format!("{open}>{child}\n{parent_indent}</Component>");
+        Ok(Some(splice(xml, parent_range, &new)))
+    } else {
+        // Has children: splice the new child in just before the parent's own
+        // closing `</Component>` (the LAST one in the element's text).
+        let close_rel = parent_text
+            .rfind("</Component>")
+            .ok_or_else(|| EditError::Invalid("malformed Organisation node".into()))?;
+        let abs_close = parent_range.start + close_rel;
+        let line_start = xml[..abs_close].rfind('\n').unwrap_or(abs_close);
+        Ok(Some(splice(xml, line_start..line_start, &child)))
+    }
+}
+
+/// Extend `start` backwards over the preceding indentation and its line break
+/// (LF or CRLF) so deleting `[extended_start..end)` removes the element's whole
+/// line and leaves no blank line behind. Shared by `<List>` and `<Organisation>`
+/// deletions.
+pub(crate) fn line_extended_start(xml: &str, start: usize) -> usize {
+    let before = &xml[..start];
+    let ws_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let prefix_is_ws = xml[ws_start..start].chars().all(|c| c == ' ' || c == '\t');
+    if prefix_is_ws && ws_start > 0 {
+        if xml[..ws_start - 1].ends_with('\r') {
+            ws_start - 2
+        } else {
+            ws_start - 1
+        }
+    } else if prefix_is_ws {
+        ws_start
+    } else {
+        start
+    }
+}
+
 pub(crate) fn splice(s: &str, range: std::ops::Range<usize>, replacement: &str) -> String {
     let mut out = String::with_capacity(s.len() - (range.end - range.start) + replacement.len());
     out.push_str(&s[..range.start]);
