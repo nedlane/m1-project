@@ -75,8 +75,9 @@ mod validate;
 mod xml;
 
 pub use edits::{
-    create_channel, create_group, delete_component, rename_component, set_call_rate, set_security,
-    set_type, set_unit,
+    ScriptRename, create_channel, create_function, create_group, create_parameter,
+    create_scheduled_function, delete_component, rename_component, script_relpath, set_call_rate,
+    set_security, set_type, set_unit,
 };
 pub use query::{ComponentEntry, available_rates, list_components, resolve_trigger};
 pub use validate::{Finding, FindingLevel, validate};
@@ -513,12 +514,14 @@ mod tests {
 
     #[test]
     fn rename_component_warns_about_script_files() {
-        // Root.Engine.Update is a MethodUser → should produce a .m1scr warning.
-        let (_, warns) = rename_component(PRJ, "Root.Engine", "Motor").unwrap();
-        // Root.Motor.Update and Root.Motor.Sub.Tick both move.
+        // Root.Engine.Update is a MethodUser → should report a .m1scr rename.
+        let (_, renames) = rename_component(PRJ, "Root.Engine", "Motor").unwrap();
+        // Root.Motor.Update and Root.Motor.Sub.Tick both move; old→new is reported.
         assert!(
-            warns.iter().any(|w| w.contains("Motor.Update.m1scr")),
-            "expected a warning for Motor.Update.m1scr, got: {warns:?}"
+            renames
+                .iter()
+                .any(|r| r.new == "Motor.Update.m1scr" && r.old == "Engine.Update.m1scr"),
+            "expected Engine.Update.m1scr → Motor.Update.m1scr, got: {renames:?}"
         );
     }
 
@@ -821,5 +824,88 @@ mod tests {
                 .any(|f| f.level == FindingLevel::Error && f.path == "Root.Ghost"),
             "dangling Organisation node must be an error, got: {findings:?}"
         );
+    }
+
+    // ---- new Built-in create verbs (match M1-Build's UI serialisation) ------
+
+    #[test]
+    fn create_channel_bare_emits_comment_like_ui() {
+        // A default channel insert in M1-Build is `<…><Comment/></…>`, not a
+        // self-closing tag.
+        let out = create_channel(PRJ_ORG, "Root.Engine.Bare", None, None, None).unwrap();
+        parses(&out);
+        let at = out.find(r#"Name="Root.Engine.Bare""#).unwrap();
+        assert!(
+            out[at..at + 200].contains("<Comment/>"),
+            "bare channel should carry <Comment/>"
+        );
+        assert!(validate(&out).unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_parameter_syncs_and_serialises() {
+        let out = create_parameter(PRJ_ORG, "Root.Engine.Gain", None, None, None).unwrap();
+        parses(&out);
+        assert!(
+            out.contains(r#"<Component Classname="BuiltIn.Parameter" Name="Root.Engine.Gain">"#)
+        );
+        let org = &out[out.find("<Organisation>").unwrap()..];
+        assert!(org.contains(r#"<Component Name="Gain"/>"#));
+        assert!(validate(&out).unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_scheduled_function_has_filename_and_is_self_closing() {
+        let out = create_scheduled_function(PRJ_ORG, "Root.Engine.Tick").unwrap();
+        parses(&out);
+        assert!(out.contains(
+            r#"<Component Classname="BuiltIn.FuncUser" Filename="Engine.Tick.m1scr" Name="Root.Engine.Tick"/>"#
+        ));
+        let org = &out[out.find("<Organisation>").unwrap()..];
+        assert!(org.contains(r#"<Component Name="Tick"/>"#));
+        assert!(validate(&out).unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_function_has_filename_and_signature() {
+        let out = create_function(PRJ_ORG, "Root.Engine.Calc").unwrap();
+        parses(&out);
+        assert!(out.contains(
+            r#"<Component Classname="BuiltIn.FuncUserParam" Filename="Engine.Calc.m1scr" Name="Root.Engine.Calc">"#
+        ));
+        assert!(out.contains(r#"<Signature Name="">"#));
+        assert!(out.contains("<![CDATA[]]>"));
+        let org = &out[out.find("<Organisation>").unwrap()..];
+        assert!(org.contains(r#"<Component Name="Calc"/>"#));
+        assert!(validate(&out).unwrap().is_empty());
+    }
+
+    #[test]
+    fn script_relpath_strips_root_and_adds_ext() {
+        assert_eq!(
+            script_relpath("Root.Control.Drive State.Update"),
+            "Control.Drive State.Update.m1scr"
+        );
+    }
+
+    #[test]
+    fn rename_script_updates_filename_and_reports_rename() {
+        let prj = create_scheduled_function(PRJ_ORG, "Root.Engine.Tick").unwrap();
+        let (out, renames) = rename_component(&prj, "Root.Engine.Tick", "Tock").unwrap();
+        parses(&out);
+        // The Filename follows the new name (no dangling reference).
+        assert!(
+            out.contains(r#"Filename="Engine.Tock.m1scr""#),
+            "Filename must update:\n{out}"
+        );
+        assert!(!out.contains(r#"Filename="Engine.Tick.m1scr""#));
+        // And the old→new file rename is reported for the CLI.
+        assert!(
+            renames
+                .iter()
+                .any(|r| r.old == "Engine.Tick.m1scr" && r.new == "Engine.Tock.m1scr"),
+            "expected Tick→Tock pair, got {renames:?}"
+        );
+        assert!(validate(&out).unwrap().is_empty());
     }
 }

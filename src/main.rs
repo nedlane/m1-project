@@ -52,6 +52,39 @@ enum Command {
         #[arg(long)]
         name: String,
     },
+    /// Create a new BuiltIn.Parameter (an M1 Tune-tunable value) under a group.
+    CreateParameter {
+        #[arg(long)]
+        project: PathBuf,
+        /// Fully-qualified name, e.g. `Root.Engine.Gain`.
+        #[arg(long)]
+        name: String,
+        /// Storage type (f32, u16, bool, …, or an enum reference).
+        #[arg(long, value_name = "TYPE")]
+        r#type: Option<String>,
+        /// Display unit (e.g. `rpm`).
+        #[arg(long)]
+        unit: Option<String>,
+        /// Security level (Tune, Calibration, Master Calibration, Resource).
+        #[arg(long)]
+        security: Option<String>,
+    },
+    /// Create a new BuiltIn.FuncUser scheduled function (creates its .m1scr too).
+    CreateScheduledFunction {
+        #[arg(long)]
+        project: PathBuf,
+        /// Fully-qualified name, e.g. `Root.Engine.Update`.
+        #[arg(long)]
+        name: String,
+    },
+    /// Create a new BuiltIn.FuncUserParam parametric function (creates its .m1scr too).
+    CreateFunction {
+        #[arg(long)]
+        project: PathBuf,
+        /// Fully-qualified name, e.g. `Root.Engine.Compute`.
+        #[arg(long)]
+        name: String,
+    },
     /// Delete a component (and optionally its whole subtree).
     DeleteComponent {
         #[arg(long)]
@@ -143,6 +176,9 @@ impl Command {
         match self {
             Command::CreateChannel { project, .. }
             | Command::CreateGroup { project, .. }
+            | Command::CreateParameter { project, .. }
+            | Command::CreateScheduledFunction { project, .. }
+            | Command::CreateFunction { project, .. }
             | Command::DeleteComponent { project, .. }
             | Command::RenameComponent { project, .. }
             | Command::SetSecurity { project, .. }
@@ -270,11 +306,14 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     // Subcommands that produce a warning (rename) are handled here before the
     // general edit/write flow.
     if let RenameComponent { name, new_name, .. } = &cli.command {
-        let (out, script_warnings) = m1_project::rename_component(&xml, name, new_name)?;
-        for w in &script_warnings {
-            eprintln!("warning: backing file may need renaming: {w}");
+        let (out, script_renames) = m1_project::rename_component(&xml, name, new_name)?;
+        let code = write_or_print(cli, project, &xml, &out)?;
+        // On a real write, rename the backing .m1scr files to follow the component
+        // (M1-Build does this in its UI). --dry-run/--stdout leave the disk alone.
+        if !cli.dry_run && !cli.stdout {
+            rename_script_files(project, &script_renames)?;
         }
-        return write_or_print(cli, project, &xml, &out);
+        return Ok(code);
     }
 
     let out = match &cli.command {
@@ -291,7 +330,22 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             unit.as_deref(),
             security.as_deref(),
         )?,
+        CreateParameter {
+            name,
+            r#type,
+            unit,
+            security,
+            ..
+        } => m1_project::create_parameter(
+            &xml,
+            name,
+            r#type.as_deref(),
+            unit.as_deref(),
+            security.as_deref(),
+        )?,
         CreateGroup { name, .. } => m1_project::create_group(&xml, name)?,
+        CreateScheduledFunction { name, .. } => m1_project::create_scheduled_function(&xml, name)?,
+        CreateFunction { name, .. } => m1_project::create_function(&xml, name)?,
         DeleteComponent {
             name,
             recursive,
@@ -315,7 +369,66 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
     };
 
-    write_or_print(cli, project, &xml, &out)
+    let code = write_or_print(cli, project, &xml, &out)?;
+    // A new script component needs an empty backing .m1scr created on disk, as
+    // M1-Build does on insert. Only on a real write.
+    if !cli.dry_run
+        && !cli.stdout
+        && let CreateScheduledFunction { name, .. } | CreateFunction { name, .. } = &cli.command
+    {
+        create_script_file(project, name)?;
+    }
+    Ok(code)
+}
+
+/// The project's `Scripts/` directory (sibling of `Project.m1prj`).
+fn scripts_dir(project: &Path) -> PathBuf {
+    project
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("Scripts")
+}
+
+/// Create the empty backing `.m1scr` for a newly-created script component, as
+/// M1-Build does on insert. Creates `Scripts/` if absent; never clobbers an
+/// existing file.
+fn create_script_file(project: &Path, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = scripts_dir(project);
+    let path = dir.join(m1_project::script_relpath(name));
+    std::fs::create_dir_all(&dir)?;
+    if path.exists() {
+        eprintln!(
+            "backing script already exists, left as-is: {}",
+            path.display()
+        );
+    } else {
+        std::fs::File::create(&path)?;
+        eprintln!("Created {}", path.display());
+    }
+    Ok(())
+}
+
+/// Rename backing `.m1scr` files to follow a `rename_component` (old → new),
+/// matching M1-Build's UI. Skips any whose source file is absent.
+fn rename_script_files(
+    project: &Path,
+    renames: &[m1_project::ScriptRename],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = scripts_dir(project);
+    for r in renames {
+        let from = dir.join(&r.old);
+        let to = dir.join(&r.new);
+        if from.exists() {
+            std::fs::rename(&from, &to)?;
+            eprintln!("Renamed {} -> {}", from.display(), to.display());
+        } else {
+            eprintln!(
+                "warning: backing script not found, skipped: {}",
+                from.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Either print to stdout (dry-run / --stdout) or write back to the project file.

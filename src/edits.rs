@@ -7,23 +7,29 @@ use crate::query::{available_rates, resolve_trigger};
 use crate::xml::*;
 use crate::{EditError, SECURITY_LEVELS, STORAGE_TYPES};
 
-/// Create a `BuiltIn.Channel` component named `name` under its (existing) parent
-/// group. `ty`/`unit`/`security` are optional. Inserted right after the last
-/// existing component under the same parent (or after the parent itself), at the
-/// parent's indentation.
-pub fn create_channel(
+/// A backing-script file the CLI should rename on disk after [`rename_component`].
+/// `old`/`new` are paths relative to the project's `Scripts/` directory (exactly
+/// the `.m1scr` files M1-Build renames when you rename a script in its UI).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptRename {
+    pub old: String,
+    pub new: String,
+}
+
+/// Shared insert primitive: place a new `<Component>` as the last *direct* child
+/// of `name`'s parent group (at the parent's indentation), then mirror it into the
+/// `<Organisation>` view tree. `attrs` are extra attributes emitted right after
+/// `Classname` (e.g. ` Filename="…"`); `body(indent)` is the element's inner
+/// content — `None` makes the element self-closing, `Some(s)` wraps it as
+/// `<Component …>{s}\n{indent}</Component>` (so `s` must carry its own leading
+/// `\n{indent} …`). This is exactly how M1-Build itself serialises an insert.
+fn insert_component(
     xml: &str,
     name: &str,
-    ty: Option<&str>,
-    unit: Option<&str>,
-    security: Option<&str>,
+    classname: &str,
+    attrs: &str,
+    body: impl FnOnce(&str) -> Option<String>,
 ) -> Result<String, EditError> {
-    if let Some(t) = ty {
-        validate_type(t)?;
-    }
-    if let Some(s) = security {
-        validate_security(s)?;
-    }
     if exists(xml, name)? {
         return Err(EditError::Duplicate(name.to_string()));
     }
@@ -60,17 +66,15 @@ pub fn create_channel(
     }
     let indent = indent_at(xml, anchor_for_indent).to_string();
 
-    let props = build_props(ty, unit, security);
-    let element = if props.is_empty() {
-        format!(
-            "\n{indent}<Component Classname=\"BuiltIn.Channel\" Name=\"{}\"/>",
+    let element = match body(&indent) {
+        None => format!(
+            "\n{indent}<Component Classname=\"{classname}\"{attrs} Name=\"{}\"/>",
             xml_escape(name)
-        )
-    } else {
-        format!(
-            "\n{indent}<Component Classname=\"BuiltIn.Channel\" Name=\"{}\">\n{indent} {props}\n{indent}</Component>",
+        ),
+        Some(inner) => format!(
+            "\n{indent}<Component Classname=\"{classname}\"{attrs} Name=\"{}\">{inner}\n{indent}</Component>",
             xml_escape(name)
-        )
+        ),
     };
 
     let mut out = String::with_capacity(xml.len() + element.len());
@@ -87,7 +91,108 @@ pub fn create_channel(
     Ok(out)
 }
 
-/// Render the `<Props>` child for a new channel from the optional type/unit/security.
+/// The body M1-Build writes for a value component (Channel/Parameter): a `<Props>`
+/// when any of type/unit/security is set, otherwise the empty `<Comment/>`
+/// placeholder it emits for a default insert.
+fn value_body(
+    indent: &str,
+    ty: Option<&str>,
+    unit: Option<&str>,
+    security: Option<&str>,
+) -> Option<String> {
+    let props = build_props(ty, unit, security);
+    if props.is_empty() {
+        Some(format!("\n{indent} <Comment/>"))
+    } else {
+        Some(format!("\n{indent} {props}"))
+    }
+}
+
+/// The conventional backing-script path for a script component: the fully-qualified
+/// name with the leading `Root.` dropped, plus `.m1scr`
+/// (`Root.Control.Drive State.Update` → `Control.Drive State.Update.m1scr`). This is
+/// the `Filename` M1-Build stores and the file it creates/renames under `Scripts/`.
+pub fn script_relpath(name: &str) -> String {
+    let stem = name.strip_prefix("Root.").unwrap_or(name);
+    format!("{stem}.m1scr")
+}
+
+/// Create a `BuiltIn.Channel` under its (existing) parent group. `ty`/`unit`/
+/// `security` are optional; with none set the element is the bare `<Comment/>`
+/// form M1-Build writes by default.
+pub fn create_channel(
+    xml: &str,
+    name: &str,
+    ty: Option<&str>,
+    unit: Option<&str>,
+    security: Option<&str>,
+) -> Result<String, EditError> {
+    if let Some(t) = ty {
+        validate_type(t)?;
+    }
+    if let Some(s) = security {
+        validate_security(s)?;
+    }
+    insert_component(xml, name, "BuiltIn.Channel", "", |indent| {
+        value_body(indent, ty, unit, security)
+    })
+}
+
+/// Create a `BuiltIn.Parameter` (a value tunable in M1 Tune) under its parent.
+/// Same shape as [`create_channel`].
+pub fn create_parameter(
+    xml: &str,
+    name: &str,
+    ty: Option<&str>,
+    unit: Option<&str>,
+    security: Option<&str>,
+) -> Result<String, EditError> {
+    if let Some(t) = ty {
+        validate_type(t)?;
+    }
+    if let Some(s) = security {
+        validate_security(s)?;
+    }
+    insert_component(xml, name, "BuiltIn.Parameter", "", |indent| {
+        value_body(indent, ty, unit, security)
+    })
+}
+
+/// Create a `BuiltIn.GroupCompound` under its (existing) parent group.
+pub fn create_group(xml: &str, name: &str) -> Result<String, EditError> {
+    validate_name_segment(name)?;
+    insert_component(xml, name, "BuiltIn.GroupCompound", "", |indent| {
+        Some(format!("\n{indent} <Comment/>"))
+    })
+}
+
+/// Create a `BuiltIn.FuncUser` scheduled function under its parent. M1-Build
+/// stores the backing script as `Filename` and creates the empty `.m1scr` on disk
+/// — the CLI creates that file (see [`script_relpath`]); the element itself is
+/// self-closing.
+pub fn create_scheduled_function(xml: &str, name: &str) -> Result<String, EditError> {
+    validate_name_segment(name)?;
+    let attrs = format!(" Filename=\"{}\"", xml_escape(&script_relpath(name)));
+    insert_component(xml, name, "BuiltIn.FuncUser", &attrs, |_| None)
+}
+
+/// Create a `BuiltIn.FuncUserParam` (parametric) function under its parent. Like a
+/// scheduled function it carries a `Filename`, plus the empty `<Signature>` block
+/// M1-Build writes for a new parametric function.
+pub fn create_function(xml: &str, name: &str) -> Result<String, EditError> {
+    validate_name_segment(name)?;
+    let attrs = format!(" Filename=\"{}\"", xml_escape(&script_relpath(name)));
+    insert_component(xml, name, "BuiltIn.FuncUserParam", &attrs, |indent| {
+        // Byte-for-byte the empty signature M1-Build emits; the CDATA lines sit at
+        // column 0 (no indent), matching M1-Build's serialiser.
+        Some(format!(
+            "\n{i} <Signature Name=\"\">\n{i}  <Description>\n<![CDATA[]]>\n{i}  </Description>\n{i}  <DescriptionFull>\n<![CDATA[]]>\n{i}  </DescriptionFull>\n{i} </Signature>",
+            i = indent
+        ))
+    })
+}
+
+/// Render the `<Props>` child for a value component from the optional type/unit/security.
 pub(crate) fn build_props(ty: Option<&str>, unit: Option<&str>, security: Option<&str>) -> String {
     let mut attrs = String::new();
     if let Some(t) = ty {
@@ -104,56 +209,6 @@ pub(crate) fn build_props(ty: Option<&str>, unit: Option<&str>, security: Option
         None if attrs.is_empty() => String::new(),
         None => format!("<Props{attrs}/>"),
     }
-}
-
-/// Create a `BuiltIn.GroupCompound` component named `name` under its (existing) parent
-/// group.  Mirrors [`create_channel`]'s anchor/splice logic — inserted right after the
-/// last existing direct child of the parent (or after the parent itself).
-pub fn create_group(xml: &str, name: &str) -> Result<String, EditError> {
-    validate_name_segment(name)?;
-    if exists(xml, name)? {
-        return Err(EditError::Duplicate(name.to_string()));
-    }
-    let parent = parent_of(name)
-        .ok_or_else(|| EditError::Invalid(format!("`{name}` has no parent group")))?;
-    let parent_loc = locate(xml, parent)?;
-
-    let prefix = format!("{parent}.");
-    let mut anchor_end = parent_loc.range.end;
-    let mut anchor_for_indent = parent_loc.range.start;
-    {
-        let doc = parse_xml(xml)?;
-        for n in doc
-            .descendants()
-            .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
-        {
-            if let Some(nm) = n.attribute("Name")
-                && let Some(rest) = nm.strip_prefix(&prefix)
-                && !rest.is_empty()
-                && !rest.contains('.')
-                && n.range().end > anchor_end
-            {
-                anchor_end = n.range().end;
-                anchor_for_indent = n.range().start;
-            }
-        }
-    }
-    let indent = indent_at(xml, anchor_for_indent).to_string();
-    let element = format!(
-        "\n{indent}<Component Classname=\"BuiltIn.GroupCompound\" Name=\"{}\"/>",
-        xml_escape(name)
-    );
-    let mut out = String::with_capacity(xml.len() + element.len());
-    out.push_str(&xml[..anchor_end]);
-    out.push_str(&element);
-    out.push_str(&xml[anchor_end..]);
-
-    // Mirror the new group into the `<Organisation>` view tree (no-op without one).
-    let leaf = name.rsplit('.').next().unwrap_or(name);
-    if let Some(synced) = org_insert_child(&out, parent, leaf)? {
-        out = synced;
-    }
-    Ok(out)
 }
 
 /// Remove a component (and its whole subtree of components whose names start with
@@ -326,14 +381,15 @@ pub fn delete_component(
 /// in the file whose resolved absolute path matches the old name or any of its
 /// descendants.
 ///
-/// `new_segment` must be a single identifier (no dots). Returns the rewritten XML
-/// and a list of `.m1scr` backing file names that the caller may need to rename
-/// on disk (the tool does NOT rename files).
+/// `new_segment` must be a single identifier (no dots). Also updates the
+/// `<Organisation>` view node and the `Filename` of every renamed script
+/// component, and returns the rewritten XML plus the backing `.m1scr` files the
+/// caller should rename on disk (old → new), matching M1-Build's UI rename.
 pub fn rename_component(
     xml: &str,
     old_name: &str,
     new_segment: &str,
-) -> Result<(String, Vec<String>), EditError> {
+) -> Result<(String, Vec<ScriptRename>), EditError> {
     // `--new-name` is the new *leaf* segment only. A dotted value here is the
     // classic misuse that silently produced a doubled path
     // (`Root.CAN.` + `Root.CAN.Foo`); reject it explicitly rather than corrupt
@@ -354,7 +410,7 @@ pub fn rename_component(
     };
 
     if new_name == old_name {
-        return Ok((xml.to_string(), Vec::new()));
+        return Ok((xml.to_string(), Vec::<ScriptRename>::new()));
     }
 
     // Verify old_name exists and new_name does not.
@@ -387,9 +443,9 @@ pub fn rename_component(
     // then alpha to ensure longest match first when we splice).
     to_rename.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(&b.0)));
 
-    // Collect backing script filenames to warn about.
-    // Convention: `Root.X.Y.Z` → `X.Y.Z.m1scr` (everything after `Root.`).
-    let script_warnings: Vec<String> = to_rename
+    // Backing-script files M1-Build renames on disk: each renamed FuncUser/
+    // FuncUserParam (or legacy MethodUser) maps its old → new `.m1scr` path.
+    let script_renames: Vec<ScriptRename> = to_rename
         .iter()
         .filter(|(old, _)| {
             doc.descendants()
@@ -402,11 +458,9 @@ pub fn rename_component(
                 })
                 .unwrap_or(false)
         })
-        .map(|(_, new)| {
-            // Convention: `Root.X.Y.Z` → `X.Y.Z.m1scr`
-            // (drop the `Root.` prefix; keep dots; append `.m1scr`)
-            let suffix = new.strip_prefix("Root.").unwrap_or(new.as_str());
-            format!("{suffix}.m1scr")
+        .map(|(old, new)| ScriptRename {
+            old: script_relpath(old),
+            new: script_relpath(new),
         })
         .collect();
 
@@ -498,18 +552,46 @@ pub fn rename_component(
         }
     }
 
-    // Pass 3: rename the matching `<Organisation>` view node. The view tree uses
+    // Pass 3: update the `Filename` of every renamed script component to its new
+    // conventional `.m1scr` path. Without this the renamed FuncUser/FuncUserParam
+    // still points at its old backing file (a dangling reference); M1-Build
+    // rewrites it (and renames the file — the CLI does that via `script_renames`).
+    {
+        let doc = parse_xml(&result)?;
+        let mut fixes: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+        for n in doc
+            .descendants()
+            .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
+        {
+            let Some(owner_new) = n.attribute("Name") else {
+                continue;
+            };
+            // Only components we just renamed carry a `new` name; skip the rest.
+            if !to_rename.iter().any(|(_, new)| new == owner_new) {
+                continue;
+            }
+            if let Some(fa) = n.attribute_node("Filename") {
+                fixes.push((fa.range_value(), script_relpath(owner_new)));
+            }
+        }
+        fixes.sort_by_key(|r| std::cmp::Reverse(r.0.start));
+        for (range, new_val) in fixes {
+            result = splice(&result, range, &xml_escape(&new_val));
+        }
+    }
+
+    // Pass 4: rename the matching `<Organisation>` view node. The view tree uses
     // short names with descendants nested inside, so ONLY this node's segment
     // changes — its children keep their (unchanged) short names. Navigate by the
-    // OLD path: passes 1-2 rewrote `<List>` Names and triggers but left the view
-    // tree alone, so it still carries the old segment here. (No-op without a
-    // view tree.) Missing this is what made M1-Build fail to load the project
-    // ("Unable to find Properties for object 'Root.X'").
+    // OLD path: earlier passes rewrote `<List>` Names/triggers/Filenames but left
+    // the view tree alone, so it still carries the old segment here. (No-op
+    // without a view tree.) Missing this is what made M1-Build fail to load the
+    // project ("Unable to find Properties for object 'Root.X'").
     if let Some((_, name_value)) = org_locate(&result, old_name)? {
         result = splice(&result, name_value, &xml_escape(new_segment));
     }
 
-    Ok((result, script_warnings))
+    Ok((result, script_renames))
 }
 
 // ---- validate ---------------------------------------------------------------
