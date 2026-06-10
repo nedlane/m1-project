@@ -43,6 +43,11 @@ impl fmt::Display for Finding {
 /// 2. No two siblings share the same `Name` attribute value.
 /// 3. Every `SelectedTrigger` resolves either to `"startup"` or to an existing
 ///    `BuiltIn.EventKernel` component under `Root.Events`.
+/// 4. The `<List>` and `<Organisation>` view tree agree (a view node with no real
+///    component is an error — M1-Build fails to load; a component missing from the
+///    view is a warning).
+/// 5. Every scheduled function (`BuiltIn.FuncUser`) has an event/trigger selected
+///    (mirrors M1-Build's "no event selected" — such a function never runs).
 pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
     let doc = parse_xml(xml)?;
     let mut findings: Vec<Finding> = Vec::new();
@@ -195,6 +200,34 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                         .into(),
                 });
             }
+        }
+    }
+
+    // Check 5: a scheduled function (BuiltIn.FuncUser) with no event/trigger. M1-Build
+    // reports this as an error ("no event selected") in Validate Project — the
+    // function would never be scheduled, so it never runs. (FuncUserParam functions
+    // are *called* by other code, not scheduled, so they legitimately have no
+    // trigger and are excluded.) A `$(…)` expression trigger counts as selected.
+    for n in doc
+        .descendants()
+        .filter(|n| n.has_tag_name("Component"))
+        .filter(|n| n.attribute("Classname") == Some("BuiltIn.FuncUser"))
+    {
+        let Some(owner) = n.attribute("Name") else {
+            continue;
+        };
+        let trigger = n
+            .children()
+            .find(|c| c.has_tag_name("Props"))
+            .and_then(|p| p.attribute("SelectedTrigger"));
+        if trigger.map(|t| t.trim().is_empty()).unwrap_or(true) {
+            findings.push(Finding {
+                level: FindingLevel::Error,
+                path: owner.to_string(),
+                message:
+                    "scheduled function has no event selected (SelectedTrigger) — it will never run"
+                        .into(),
+            });
         }
     }
 

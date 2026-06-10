@@ -17,6 +17,9 @@
 //! - [`set_security`] — set/replace a component's `<Props Security="…">`.
 //! - [`set_unit`] — set/replace a component's display unit (`<Locale><Default Unit>`).
 //! - [`set_type`] — set/replace a component's storage `Type`.
+//! - [`set_quantity`] — set/replace a component's physical quantity (`<Props Qty>`).
+//! - [`set_validation`] — set/clear a value component's `Validation`/`ValMin`/`ValMax`.
+//! - [`add_tag`]/[`remove_tag`] — manage a component's `<List.UserTags>` (the *Tags* row).
 //! - [`set_call_rate`] — point a script's `SelectedTrigger` at an `On <N>Hz` clock.
 //! - [`validate`] — read-only check for structural violations.
 //! - [`list_components`] — enumerate every component in document order.
@@ -75,15 +78,18 @@ mod validate;
 mod xml;
 
 pub use edits::{
-    ScriptRename, create_channel, create_function, create_group, create_parameter,
-    create_scheduled_function, delete_component, rename_component, script_relpath, set_call_rate,
-    set_security, set_type, set_unit,
+    ScriptRename, add_tag, create_channel, create_function, create_group, create_parameter,
+    create_scheduled_function, delete_component, remove_tag, rename_component, script_relpath,
+    set_call_rate, set_quantity, set_security, set_type, set_unit, set_validation,
 };
-pub use query::{ComponentEntry, available_rates, list_components, resolve_trigger};
+pub use query::{
+    ComponentEntry, ScriptComponent, available_rates, list_components, resolve_trigger,
+    script_components,
+};
 pub use validate::{Finding, FindingLevel, validate};
 
 #[cfg(test)]
-pub(crate) use edits::build_trigger;
+pub(crate) use edits::{build_trigger, format_motec_float};
 
 #[cfg(test)]
 mod tests {
@@ -863,7 +869,165 @@ mod tests {
         ));
         let org = &out[out.find("<Organisation>").unwrap()..];
         assert!(org.contains(r#"<Component Name="Tick"/>"#));
-        assert!(validate(&out).unwrap().is_empty());
+        // A freshly-inserted scheduled function has no event yet — validate flags
+        // it exactly as M1-Build does ("no event selected"). Assigning a rate
+        // clears the finding.
+        assert!(
+            validate(&out)
+                .unwrap()
+                .iter()
+                .any(|f| f.path == "Root.Engine.Tick" && f.message.contains("no event")),
+            "new scheduled function should be flagged as eventless: {:?}",
+            validate(&out).unwrap()
+        );
+        let wired = set_call_rate(&out, "Root.Engine.Tick", "100").unwrap();
+        assert!(
+            validate(&wired).unwrap().is_empty(),
+            "scheduled function with a rate should validate clean: {:?}",
+            validate(&wired).unwrap()
+        );
+    }
+
+    // ---- property setters discovered from M1-Build's Properties tab ----------
+
+    #[test]
+    fn set_quantity_sets_and_replaces() {
+        let out = set_quantity(PRJ, "Root.Engine.Speed", "rad/s").unwrap();
+        parses(&out);
+        assert!(out.contains(r#"Qty="rad/s""#));
+        // Type is untouched.
+        assert!(out.contains(r#"Type="f32""#));
+        let out2 = set_quantity(&out, "Root.Engine.Speed", "Hz").unwrap();
+        assert!(out2.contains(r#"Qty="Hz""#) && !out2.contains(r#"Qty="rad/s""#));
+    }
+
+    #[test]
+    fn set_quantity_on_props_less_component() {
+        // Root.Engine.Plain is self-closing with no <Props>.
+        let out = set_quantity(PRJ, "Root.Engine.Plain", "ratio").unwrap();
+        parses(&out);
+        assert!(out.contains(r#"Qty="ratio""#));
+    }
+
+    #[test]
+    fn format_motec_float_matches_m1build() {
+        assert_eq!(format_motec_float(0.0), "0.00000000000000000e+00");
+        assert_eq!(format_motec_float(1.0), "1.00000000000000000e+00");
+        assert_eq!(format_motec_float(100.0), "1.00000000000000000e+02");
+        assert_eq!(format_motec_float(0.5), "5.00000000000000000e-01");
+    }
+
+    #[test]
+    fn set_validation_minmax_writes_bounds() {
+        let out = set_validation(PRJ, "Root.Engine.Speed", "MinMax", Some(0.0), Some(1.0)).unwrap();
+        parses(&out);
+        assert!(out.contains(r#"Validation="MinMax""#));
+        assert!(out.contains(r#"ValMin="0.00000000000000000e+00""#));
+        assert!(out.contains(r#"ValMax="1.00000000000000000e+00""#));
+        // Clearing removes all three attributes again.
+        let cleared = set_validation(&out, "Root.Engine.Speed", "None", None, None).unwrap();
+        parses(&cleared);
+        assert!(!cleared.contains("Validation="));
+        assert!(!cleared.contains("ValMin="));
+        assert!(!cleared.contains("ValMax="));
+        // The unrelated Type attribute survives the clear.
+        assert!(cleared.contains(r#"Type="f32""#));
+    }
+
+    #[test]
+    fn set_validation_minmax_requires_bounds() {
+        assert!(matches!(
+            set_validation(PRJ, "Root.Engine.Speed", "MinMax", None, None),
+            Err(EditError::Invalid(_))
+        ));
+        assert!(matches!(
+            set_validation(PRJ, "Root.Engine.Speed", "MinMax", Some(2.0), Some(1.0)),
+            Err(EditError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn add_tag_creates_props_and_list() {
+        // Root.Engine.Plain has no <Props>; add_tag must build the whole chain.
+        let out = add_tag(PRJ, "Root.Engine.Plain", "Vehicle").unwrap();
+        parses(&out);
+        // M1-Build's layout: one space deeper per level, every <Entry> on its
+        // own line.
+        assert!(
+            out.contains(
+                "\n      <List.UserTags>\n       <Entry Value=\"Vehicle\"/>\n      </List.UserTags>"
+            ),
+            "M1-Build multi-line List.UserTags layout:\n{out}"
+        );
+        // Idempotent: re-adding the same tag is a no-op.
+        let again = add_tag(&out, "Root.Engine.Plain", "Vehicle").unwrap();
+        assert_eq!(again, out);
+        // A second tag appends a second <Entry> in the same <List.UserTags>.
+        let two = add_tag(&out, "Root.Engine.Plain", "Tune").unwrap();
+        parses(&two);
+        assert_eq!(two.matches("<List.UserTags>").count(), 1);
+        assert!(two.contains(r#"<Entry Value="Vehicle"/>"#));
+        assert!(two.contains(r#"<Entry Value="Tune"/>"#));
+    }
+
+    #[test]
+    fn add_tag_into_existing_props() {
+        // Root.Engine.Speed already has `<Props Type="f32" Security="Tune"/>`.
+        let out = add_tag(PRJ, "Root.Engine.Speed", "Tune").unwrap();
+        parses(&out);
+        assert!(out.contains(r#"Type="f32""#) && out.contains(r#"Security="Tune""#));
+        assert!(
+            out.contains(
+                "\n      <List.UserTags>\n       <Entry Value=\"Tune\"/>\n      </List.UserTags>"
+            ),
+            "M1-Build multi-line List.UserTags layout:\n{out}"
+        );
+    }
+
+    #[test]
+    fn remove_tag_removes_entry_and_empties_list() {
+        let one = add_tag(PRJ, "Root.Engine.Plain", "Vehicle").unwrap();
+        let two = add_tag(&one, "Root.Engine.Plain", "Tune").unwrap();
+        // Remove one of two: the list survives with the other.
+        let back = remove_tag(&two, "Root.Engine.Plain", "Tune").unwrap();
+        parses(&back);
+        assert!(back.contains(r#"<Entry Value="Vehicle"/>"#));
+        assert!(!back.contains(r#"<Entry Value="Tune"/>"#));
+        // Remove the last: the <List.UserTags> element disappears entirely.
+        let none = remove_tag(&back, "Root.Engine.Plain", "Vehicle").unwrap();
+        parses(&none);
+        assert!(!none.contains("<List.UserTags>"));
+    }
+
+    #[test]
+    fn remove_tag_absent_errors() {
+        assert!(matches!(
+            remove_tag(PRJ, "Root.Engine.Speed", "Ghost"),
+            Err(EditError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn validate_flags_eventless_scheduled_function() {
+        let prj = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession><Project Name="T"><ComponentStream><List>
+<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.FuncUser" Filename="Sched.m1scr" Name="Root.Sched"/>
+<Component Classname="BuiltIn.FuncUserParam" Filename="Fn.m1scr" Name="Root.Fn"/>
+</List></ComponentStream></Project></MoTeCM1BuildSession>"#;
+        let findings = validate(prj).unwrap();
+        // The scheduled function (FuncUser) is flagged…
+        assert!(
+            findings.iter().any(|f| f.path == "Root.Sched"
+                && f.level == FindingLevel::Error
+                && f.message.contains("no event")),
+            "eventless FuncUser must be an error: {findings:?}"
+        );
+        // …but the parametric function (FuncUserParam) is NOT (it is called, not scheduled).
+        assert!(
+            !findings.iter().any(|f| f.path == "Root.Fn"),
+            "FuncUserParam must not be flagged for a missing event: {findings:?}"
+        );
     }
 
     #[test]
@@ -906,6 +1070,13 @@ mod tests {
                 .any(|r| r.old == "Engine.Tick.m1scr" && r.new == "Engine.Tock.m1scr"),
             "expected Tick→Tock pair, got {renames:?}"
         );
-        assert!(validate(&out).unwrap().is_empty());
+        // The scheduled function still needs an event (Check 5); give it one, then
+        // the project is structurally clean.
+        let wired = set_call_rate(&out, "Root.Engine.Tock", "100").unwrap();
+        assert!(
+            validate(&wired).unwrap().is_empty(),
+            "renamed+wired scheduled function should validate clean: {:?}",
+            validate(&wired).unwrap()
+        );
     }
 }

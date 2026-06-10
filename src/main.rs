@@ -137,6 +137,49 @@ enum Command {
         #[arg(long)]
         unit: String,
     },
+    /// Set a component's physical quantity (`<Props Qty>`, e.g. `ratio`, `rad/s`).
+    SetQuantity {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        component: String,
+        #[arg(long)]
+        quantity: String,
+    },
+    /// Set or clear a value component's validation bounds.
+    SetValidation {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        component: String,
+        /// Validation type: `MinMax` (needs --min/--max) or `None` (clears it).
+        #[arg(long, value_name = "TYPE", default_value = "MinMax")]
+        r#type: String,
+        /// Lower bound (required for MinMax).
+        #[arg(long)]
+        min: Option<f64>,
+        /// Upper bound (required for MinMax).
+        #[arg(long)]
+        max: Option<f64>,
+    },
+    /// Add a user tag to a component (the *Tags* row; fixes "Mandatory tag not selected").
+    AddTag {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        component: String,
+        #[arg(long)]
+        tag: String,
+    },
+    /// Remove a user tag from a component.
+    RemoveTag {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        component: String,
+        #[arg(long)]
+        tag: String,
+    },
     /// Set a script's execution rate (e.g. `100` Hz, or `startup`).
     SetCallRate {
         #[arg(long)]
@@ -184,6 +227,10 @@ impl Command {
             | Command::SetSecurity { project, .. }
             | Command::SetType { project, .. }
             | Command::SetUnit { project, .. }
+            | Command::SetQuantity { project, .. }
+            | Command::SetValidation { project, .. }
+            | Command::AddTag { project, .. }
+            | Command::RemoveTag { project, .. }
             | Command::SetCallRate { project, .. }
             | Command::ListRates { project, .. }
             | Command::Validate { project, .. }
@@ -221,7 +268,12 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Validate { project } => {
             let (xml, _enc) = m1_workspace::read_text_with_encoding(project)
                 .map_err(|e| format!("{}: {e}", project.display()))?;
-            let findings = m1_project::validate(&xml)?;
+            let mut findings = m1_project::validate(&xml)?;
+            // File-aware check (only the CLI does I/O): a script component whose
+            // backing `.m1scr` is missing or empty is M1-Build's "Missing code"
+            // error. `validate()` itself stays pure (`&str` → findings).
+            findings.extend(missing_code_findings(project, &xml));
+            findings.sort_by(|a, b| a.path.cmp(&b.path).then(a.message.cmp(&b.message)));
             let errors = findings
                 .iter()
                 .filter(|f| f.level == m1_project::FindingLevel::Error)
@@ -363,6 +415,20 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         SetUnit {
             component, unit, ..
         } => m1_project::set_unit(&xml, component, unit)?,
+        SetQuantity {
+            component,
+            quantity,
+            ..
+        } => m1_project::set_quantity(&xml, component, quantity)?,
+        SetValidation {
+            component,
+            r#type,
+            min,
+            max,
+            ..
+        } => m1_project::set_validation(&xml, component, r#type, *min, *max)?,
+        AddTag { component, tag, .. } => m1_project::add_tag(&xml, component, tag)?,
+        RemoveTag { component, tag, .. } => m1_project::remove_tag(&xml, component, tag)?,
         SetCallRate { script, rate, .. } => m1_project::set_call_rate(&xml, script, rate)?,
         ListRates { .. } | Validate { .. } | ListComponents { .. } | RenameComponent { .. } => {
             unreachable!()
@@ -379,6 +445,38 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         create_script_file(project, name)?;
     }
     Ok(code)
+}
+
+/// Findings for script components whose backing `.m1scr` **exists but is empty** —
+/// the CLI's file-aware mirror of M1-Build's "Missing code" (Error 1024).
+///
+/// IMPORTANT: an *absent* `.m1scr` is NOT a finding. Many components (library/base
+/// method slots — `Calculation`, `Transform`, `SetState`, `Startup`, …) carry no
+/// project script and inherit their behaviour; M1-Build does not flag those, and
+/// neither do we (verified: the real AV-M1 project has 58 such codeless components
+/// and M1-Build's Validate reports 0 errors for them). Only a present-but-empty
+/// file — the stub M1-Build leaves when you insert a function and write no code —
+/// is the "Missing code" error.
+fn missing_code_findings(project: &Path, xml: &str) -> Vec<m1_project::Finding> {
+    let Ok(scripts) = m1_project::script_components(xml) else {
+        return Vec::new();
+    };
+    let dir = scripts_dir(project);
+    let mut out = Vec::new();
+    for s in scripts {
+        // Only a file that EXISTS and is empty/whitespace counts; a missing file
+        // means the component inherits its code and is legitimately script-less.
+        if let Ok(body) = std::fs::read_to_string(dir.join(&s.filename))
+            && body.trim().is_empty()
+        {
+            out.push(m1_project::Finding {
+                level: m1_project::FindingLevel::Error,
+                path: s.path.clone(),
+                message: format!("missing code: backing script `{}` is empty", s.filename),
+            });
+        }
+    }
+    out
 }
 
 /// The project's `Scripts/` directory (sibling of `Project.m1prj`).

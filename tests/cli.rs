@@ -183,8 +183,16 @@ fn rename_component_cli_smoke() {
 #[test]
 fn validate_cli_clean_project() {
     let bin = env!("CARGO_BIN_EXE_m1-project");
-    let path = tmp_path("validate_clean.m1prj");
+    // A genuinely-clean project needs its script component's backing `.m1scr` to
+    // exist and carry code (the CLI's "missing code" check is file-aware), so use
+    // a dedicated dir with a populated Scripts/ rather than a bare temp file.
+    let dir = tmp_path("validate_clean_dir");
+    let scripts = dir.join("Scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    let path = dir.join("Project.m1prj");
     std::fs::write(&path, minimal_project()).unwrap();
+    // minimal_project()'s MethodUser is Root.Engine.Update → Engine.Update.m1scr.
+    std::fs::write(scripts.join("Engine.Update.m1scr"), "Speed = 1;\n").unwrap();
 
     let out = Command::new(bin)
         .args(["validate", "--project"])
@@ -202,7 +210,7 @@ fn validate_cli_clean_project() {
         "expected zero findings, got: {stdout}"
     );
 
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -234,6 +242,37 @@ fn validate_cli_exits_nonzero_on_bad_trigger() {
     );
 
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn validate_cli_flags_missing_code() {
+    // A script component whose backing .m1scr is empty is M1-Build's "Missing
+    // code" error; the CLI's file-aware check must surface it and exit non-zero.
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let dir = tmp_path("validate_missing_code_dir");
+    let scripts = dir.join("Scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    let path = dir.join("Project.m1prj");
+    std::fs::write(&path, minimal_project()).unwrap();
+    // Engine.Update.m1scr present but EMPTY → "missing code".
+    std::fs::write(scripts.join("Engine.Update.m1scr"), "   \n").unwrap();
+
+    let out = Command::new(bin)
+        .args(["validate", "--project"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "validate should exit non-zero when a script has no code"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("missing code") && stdout.contains("Root.Engine.Update"),
+        "expected a missing-code finding, got: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
