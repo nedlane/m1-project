@@ -54,46 +54,89 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
     let doc = parse_xml(xml)?;
     let mut findings: Vec<Finding> = Vec::new();
 
-    // Build a set of all component names for fast lookup.
-    // Only real components (those with a Classname attribute) — the <Organisation>
-    // section also contains <Component> nodes without Classname that are view-only
-    // structural nodes and must not participate in any validation check.
-    let all_names: std::collections::HashSet<String> = doc
-        .descendants()
-        .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
-        .filter_map(|n| n.attribute("Name"))
-        .map(str::to_string)
-        .collect();
+    // ONE pass over the document fills every accumulator the checks below need;
+    // validate() used to make eight separate `descendants()` traversals, and it
+    // wraps every mutating verb, so large projects paid 8× the necessary
+    // tree-walk cost per edit (#40). Only real components (those with a
+    // Classname attribute) participate — the <Organisation> section also
+    // contains <Component> nodes without Classname that are view-only
+    // structural nodes; they are collected separately for check 4.
+    let mut all_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut valid_clocks: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut by_parent: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    // (owner, trigger) pairs for check 3 — resolution needs `valid_clocks`
+    // complete, so it runs after the pass.
+    let mut triggered: Vec<(String, String)> = Vec::new();
+    let mut org_roots: Vec<roxmltree::Node> = Vec::new();
 
-    // Build the set of valid clock absolute paths for trigger resolution.
-    let valid_clocks: std::collections::HashSet<String> = doc
-        .descendants()
-        .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
-        .filter(|n| n.attribute("Classname") == Some("BuiltIn.EventKernel"))
-        .filter_map(|n| n.attribute("Name"))
-        .map(str::to_string)
-        .collect();
-
-    // Check 2: duplicate sibling Names.
-    // Walk each Component's parent and check that no two direct children share a Name.
-    // We detect "siblings" as components whose parent paths are the same.
-    // Only real components (Classname present) — Organisation nodes are excluded.
-    {
-        // Group names by parent path.
-        let mut by_parent: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        for n in doc
-            .descendants()
-            .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
-        {
-            if let Some(nm) = n.attribute("Name") {
-                let parent_key = parent_of(nm).unwrap_or("").to_string();
-                by_parent
-                    .entry(parent_key)
-                    .or_default()
-                    .push(nm.to_string());
-            }
+    for n in doc.descendants() {
+        if n.has_tag_name("Organisation") {
+            org_roots.push(n);
+            continue;
         }
+        if !n.has_tag_name("Component") {
+            continue;
+        }
+        let Some(classname) = n.attribute("Classname") else {
+            continue;
+        };
+        let Some(nm) = n.attribute("Name") else {
+            continue;
+        };
+        let props = n.children().find(|c| c.has_tag_name("Props"));
+        let trigger = props.and_then(|p| p.attribute("SelectedTrigger"));
+
+        all_names.insert(nm.to_string());
+        if classname == "BuiltIn.EventKernel" {
+            valid_clocks.insert(nm.to_string());
+        }
+        by_parent
+            .entry(parent_of(nm).unwrap_or("").to_string())
+            .or_default()
+            .push(nm.to_string());
+        if let Some(t) = trigger {
+            triggered.push((nm.to_string(), t.to_string()));
+        }
+
+        // Check 5: a scheduled function (BuiltIn.FuncUser) with no event/trigger.
+        // M1-Build reports this as an error ("no event selected") in Validate
+        // Project — the function would never be scheduled, so it never runs.
+        // (FuncUserParam functions are *called* by other code, not scheduled, so
+        // they legitimately have no trigger and are excluded.) A `$(…)`
+        // expression trigger counts as selected.
+        if classname == "BuiltIn.FuncUser" && trigger.map(|t| t.trim().is_empty()).unwrap_or(true) {
+            findings.push(Finding {
+                level: FindingLevel::Error,
+                path: nm.to_string(),
+                message:
+                    "scheduled function has no event selected (SelectedTrigger) — it will never run"
+                        .into(),
+            });
+        }
+
+        // Check 6: a value component (Channel/Parameter) with no security group.
+        // M1-Build requires every channel/parameter to have a Security level and
+        // reports "No security group selected" (Error 1601) otherwise. Verified
+        // safe: all 737 channels/parameters in the real AV-M1 project carry a
+        // `Security` and M1-Build reports 0 errors; a freshly-inserted bare one
+        // is flagged (exactly what `create-channel`/`create-parameter` produce
+        // until `set-security`).
+        if matches!(classname, "BuiltIn.Channel" | "BuiltIn.Parameter")
+            && props.and_then(|p| p.attribute("Security")).is_none()
+        {
+            findings.push(Finding {
+                level: FindingLevel::Error,
+                path: nm.to_string(),
+                message: "no security group selected — a channel/parameter needs a Security level"
+                    .into(),
+            });
+        }
+    }
+
+    // Check 2: duplicate sibling Names — no two direct children of one parent
+    // path may share a Name segment.
+    {
         for (parent_key, siblings) in &by_parent {
             let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
             let mut duped: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -119,21 +162,10 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
         }
     }
 
-    // Check 3: SelectedTrigger resolution.
-    for n in doc
-        .descendants()
-        .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
-    {
-        let Some(owner) = n.attribute("Name") else {
-            continue;
-        };
-        let Some(trigger) = n
-            .children()
-            .find(|c| c.has_tag_name("Props"))
-            .and_then(|p| p.attribute("SelectedTrigger"))
-        else {
-            continue;
-        };
+    // Check 3: SelectedTrigger resolution (over the pairs collected above —
+    // resolution needs the complete clock set).
+    for (owner, trigger) in &triggered {
+        let (owner, trigger) = (owner.as_str(), trigger.as_str());
         // "On Startup" is always valid (no clock component needed in some projects).
         if trigger.eq_ignore_ascii_case("startup")
             || trigger.ends_with(".On Startup")
@@ -177,10 +209,10 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
     //     the project ("Unable to find Properties for object 'Root.X'"), and
     //   - a real component absent from the view tree will not display.
     // (Projects without any <Organisation> skip this check entirely.)
-    if doc.descendants().any(|n| n.has_tag_name("Organisation")) {
+    if !org_roots.is_empty() {
         let mut org_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for org in doc.descendants().filter(|n| n.has_tag_name("Organisation")) {
-            collect_org_paths(org, "", &mut org_paths);
+        for org in &org_roots {
+            collect_org_paths(*org, "", &mut org_paths);
         }
         for p in &org_paths {
             if !all_names.contains(p) {
@@ -202,68 +234,6 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                         .into(),
                 });
             }
-        }
-    }
-
-    // Check 5: a scheduled function (BuiltIn.FuncUser) with no event/trigger. M1-Build
-    // reports this as an error ("no event selected") in Validate Project — the
-    // function would never be scheduled, so it never runs. (FuncUserParam functions
-    // are *called* by other code, not scheduled, so they legitimately have no
-    // trigger and are excluded.) A `$(…)` expression trigger counts as selected.
-    for n in doc
-        .descendants()
-        .filter(|n| n.has_tag_name("Component"))
-        .filter(|n| n.attribute("Classname") == Some("BuiltIn.FuncUser"))
-    {
-        let Some(owner) = n.attribute("Name") else {
-            continue;
-        };
-        let trigger = n
-            .children()
-            .find(|c| c.has_tag_name("Props"))
-            .and_then(|p| p.attribute("SelectedTrigger"));
-        if trigger.map(|t| t.trim().is_empty()).unwrap_or(true) {
-            findings.push(Finding {
-                level: FindingLevel::Error,
-                path: owner.to_string(),
-                message:
-                    "scheduled function has no event selected (SelectedTrigger) — it will never run"
-                        .into(),
-            });
-        }
-    }
-
-    // Check 6: a value component (Channel/Parameter) with no security group.
-    // M1-Build requires every channel/parameter to have a Security level and
-    // reports "No security group selected" (Error 1601) otherwise. Verified safe:
-    // all 737 channels/parameters in the real AV-M1 project carry a `Security` and
-    // M1-Build reports 0 errors; a freshly-inserted bare one is flagged (exactly
-    // what `create-channel`/`create-parameter` produce until `set-security`).
-    for n in doc
-        .descendants()
-        .filter(|n| n.has_tag_name("Component"))
-        .filter(|n| {
-            matches!(
-                n.attribute("Classname"),
-                Some("BuiltIn.Channel") | Some("BuiltIn.Parameter")
-            )
-        })
-    {
-        let Some(owner) = n.attribute("Name") else {
-            continue;
-        };
-        let has_security = n
-            .children()
-            .find(|c| c.has_tag_name("Props"))
-            .and_then(|p| p.attribute("Security"))
-            .is_some();
-        if !has_security {
-            findings.push(Finding {
-                level: FindingLevel::Error,
-                path: owner.to_string(),
-                message: "no security group selected — a channel/parameter needs a Security level"
-                    .into(),
-            });
         }
     }
 

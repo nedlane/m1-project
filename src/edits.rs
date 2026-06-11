@@ -158,6 +158,104 @@ pub fn create_parameter(
     })
 }
 
+/// Create a `BuiltIn.Constant` under its (existing) parent group, with the
+/// literal `Value` M1-Build shows in the *Value* row (`<Props Value="…"/>` —
+/// the corpus shape, e.g. a CAN bus selector `Value="CAN Bus 1"`).
+pub fn create_constant(xml: &str, name: &str, value: &str) -> Result<String, EditError> {
+    validate_name_segment(name)?;
+    if value.trim().is_empty() {
+        return Err(EditError::Invalid(
+            "constant value must not be empty".into(),
+        ));
+    }
+    insert_component(xml, name, "BuiltIn.Constant", "", |indent| {
+        Some(format!(
+            "\n{indent} <Props Value=\"{}\"/>",
+            xml_escape(value)
+        ))
+    })
+}
+
+/// One axis of a [`create_table`] table: the source channel reference and an
+/// optional `MaxSites` site count.
+#[derive(Debug, Clone)]
+pub struct TableAxis {
+    pub source: String,
+    pub sites: Option<u32>,
+}
+
+/// Create a `BuiltIn.Table` under its (existing) parent group, with 1–3 axes
+/// (X/Y/Z, in that order — the corpus shape: `<Props Security NumAxes>` wrapping
+/// `<Axis>` with `<X/Y/Z Source MaxSites>` children, then `<Comment/>`).
+///
+/// Axis sources may be given as absolute `Root.…` component paths — they are
+/// validated against the project and rewritten to the group-relative
+/// `Parent.…` form M1-Build stores (same convention as `SelectedTrigger`) — or
+/// passed through verbatim when already relative. M1-Build generates the
+/// table's `Caps="AutoCreated"` companions (`.Value`, `.Init`, `.Update`) when
+/// it next opens the project, exactly as it does for a table created in its UI.
+pub fn create_table(
+    xml: &str,
+    name: &str,
+    axes: &[TableAxis],
+    security: Option<&str>,
+) -> Result<String, EditError> {
+    validate_name_segment(name)?;
+    if axes.is_empty() || axes.len() > 3 {
+        return Err(EditError::Invalid(format!(
+            "a table needs 1–3 axes (X, then Y, then Z), got {}",
+            axes.len()
+        )));
+    }
+    if let Some(s) = security {
+        validate_security(s)?;
+    }
+
+    // Resolve each axis source: absolute paths must exist and become
+    // group-relative (relative to the table itself, like SelectedTrigger).
+    let mut resolved: Vec<TableAxis> = Vec::with_capacity(axes.len());
+    for axis in axes {
+        let source = if axis.source.starts_with("Root.") || axis.source == "Root" {
+            if !exists(xml, &axis.source)? {
+                return Err(EditError::Invalid(format!(
+                    "axis source `{}` does not exist in the project",
+                    axis.source
+                )));
+            }
+            build_trigger(name, &axis.source)
+        } else {
+            axis.source.clone()
+        };
+        resolved.push(TableAxis {
+            source,
+            sites: axis.sites,
+        });
+    }
+
+    let mut props_attrs = String::new();
+    if let Some(s) = security {
+        props_attrs.push_str(&format!(" Security=\"{}\"", xml_escape(s)));
+    }
+    props_attrs.push_str(&format!(" NumAxes=\"{}\"", resolved.len()));
+
+    insert_component(xml, name, "BuiltIn.Table", "", |indent| {
+        let mut axis_lines = String::new();
+        for (letter, axis) in ["X", "Y", "Z"].iter().zip(&resolved) {
+            let sites = match axis.sites {
+                Some(n) => format!(" MaxSites=\"{n}\""),
+                None => String::new(),
+            };
+            axis_lines.push_str(&format!(
+                "\n{indent}   <{letter} Source=\"{}\"{sites}/>",
+                xml_escape(&axis.source)
+            ));
+        }
+        Some(format!(
+            "\n{indent} <Props{props_attrs}>\n{indent}  <Axis>{axis_lines}\n{indent}  </Axis>\n{indent} </Props>\n{indent} <Comment/>"
+        ))
+    })
+}
+
 /// Create a `BuiltIn.GroupCompound` under its (existing) parent group.
 pub fn create_group(xml: &str, name: &str) -> Result<String, EditError> {
     validate_name_segment(name)?;

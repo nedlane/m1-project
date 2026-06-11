@@ -68,6 +68,41 @@ fn create_channel_under_a_real_group() {
 }
 
 #[test]
+fn create_table_under_a_real_group() {
+    let Some(xml) = corpus_project() else {
+        eprintln!("corpus absent; skipping");
+        return;
+    };
+    let group = components_of_class(&xml, "BuiltIn.GroupCompound")
+        .into_iter()
+        .next()
+        .expect("corpus has a group");
+    let channel = components_of_class(&xml, "BuiltIn.Channel")
+        .into_iter()
+        .next()
+        .expect("corpus has a channel");
+    let new = format!("{group}.M1ProjectSmokeTestTable");
+    let axes = [m1_project::TableAxis {
+        source: channel.clone(),
+        sites: Some(11),
+    }];
+    let out = m1_project::create_table(&xml, &new, &axes, Some("Tune")).unwrap();
+
+    roxmltree::Document::parse(&out).expect("result must be valid XML");
+    assert!(out.contains(&new));
+    assert!(out.contains(r#"NumAxes="1""#));
+    assert_eq!(component_count(&out), component_count(&xml) + 1);
+    // The absolute channel path was relativized — the literal absolute form
+    // must not appear in the new table's axis.
+    assert!(out.contains("<X Source=\"Parent."));
+    // No new validate findings on the real project.
+    assert_eq!(
+        m1_project::validate(&out).unwrap().len(),
+        m1_project::validate(&xml).unwrap().len()
+    );
+}
+
+#[test]
 fn set_call_rate_matches_corpus_trigger_format() {
     let Some(xml) = corpus_project() else {
         return;
