@@ -69,6 +69,46 @@ enum Command {
         #[arg(long)]
         security: Option<String>,
     },
+    /// Create a new BuiltIn.Constant (a fixed literal value) under a group.
+    CreateConstant {
+        #[arg(long)]
+        project: PathBuf,
+        /// Fully-qualified name, e.g. `Root.CAN.CAN Bus Tertiary.Bus`.
+        #[arg(long)]
+        name: String,
+        /// The literal value (e.g. `CAN Bus 1`).
+        #[arg(long)]
+        value: String,
+    },
+    /// Create a new BuiltIn.Table (1-3 axis lookup table) under a group.
+    /// M1-Build generates the table's AutoCreated companions (.Value/.Init/
+    /// .Update) when it next opens the project, as for a UI-created table.
+    CreateTable {
+        #[arg(long)]
+        project: PathBuf,
+        /// Fully-qualified name, e.g. `Root.Control.Pedal Map.Tune`.
+        #[arg(long)]
+        name: String,
+        /// X-axis source channel (absolute `Root.…` path — validated and
+        /// stored group-relative — or a `Parent.…` reference verbatim).
+        #[arg(long, value_name = "SOURCE")]
+        axis_x: String,
+        /// Maximum X-axis sites (table breakpoints).
+        #[arg(long, value_name = "N")]
+        x_sites: Option<u32>,
+        /// Y-axis source channel (makes the table 2-axis).
+        #[arg(long, value_name = "SOURCE")]
+        axis_y: Option<String>,
+        /// Maximum Y-axis sites.
+        #[arg(long, value_name = "N", requires = "axis_y")]
+        y_sites: Option<u32>,
+        /// Z-axis source channel (makes the table 3-axis).
+        #[arg(long, value_name = "SOURCE", requires = "axis_y")]
+        axis_z: Option<String>,
+        /// Security level (Tune, Calibration, Master Calibration, Resource).
+        #[arg(long)]
+        security: Option<String>,
+    },
     /// Create a new BuiltIn.FuncUser scheduled function (creates its .m1scr too).
     CreateScheduledFunction {
         #[arg(long)]
@@ -249,6 +289,8 @@ impl Command {
             Command::CreateChannel { project, .. }
             | Command::CreateGroup { project, .. }
             | Command::CreateParameter { project, .. }
+            | Command::CreateConstant { project, .. }
+            | Command::CreateTable { project, .. }
             | Command::CreateScheduledFunction { project, .. }
             | Command::CreateFunction { project, .. }
             | Command::DeleteComponent { project, .. }
@@ -427,6 +469,35 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             unit.as_deref(),
             security.as_deref(),
         )?,
+        CreateConstant { name, value, .. } => m1_project::create_constant(&xml, name, value)?,
+        CreateTable {
+            name,
+            axis_x,
+            x_sites,
+            axis_y,
+            y_sites,
+            axis_z,
+            security,
+            ..
+        } => {
+            let mut axes = vec![m1_project::TableAxis {
+                source: axis_x.clone(),
+                sites: *x_sites,
+            }];
+            if let Some(y) = axis_y {
+                axes.push(m1_project::TableAxis {
+                    source: y.clone(),
+                    sites: *y_sites,
+                });
+            }
+            if let Some(z) = axis_z {
+                axes.push(m1_project::TableAxis {
+                    source: z.clone(),
+                    sites: None,
+                });
+            }
+            m1_project::create_table(&xml, name, &axes, security.as_deref())?
+        }
         CreateGroup { name, .. } => m1_project::create_group(&xml, name)?,
         CreateScheduledFunction { name, .. } => m1_project::create_scheduled_function(&xml, name)?,
         CreateFunction { name, .. } => m1_project::create_function(&xml, name)?,

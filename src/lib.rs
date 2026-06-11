@@ -11,6 +11,8 @@
 //!
 //! Supported edits (see each `pub fn`):
 //! - [`create_channel`] — add a `BuiltIn.Channel` component under an existing group.
+//! - [`create_constant`] — add a `BuiltIn.Constant` with its literal `Value`.
+//! - [`create_table`] — add a `BuiltIn.Table` with 1–3 axes.
 //! - [`create_group`] — add a `BuiltIn.GroupCompound` under an existing group.
 //! - [`delete_component`] — remove a component element (and optionally its subtree).
 //! - [`rename_component`] — rename a component and update all `SelectedTrigger` references.
@@ -80,10 +82,10 @@ mod validate;
 mod xml;
 
 pub use edits::{
-    ScriptRename, add_tag, create_channel, create_function, create_group, create_parameter,
-    create_scheduled_function, delete_component, remove_tag, rename_component, script_relpath,
-    set_call_rate, set_display_range, set_dps, set_format, set_quantity, set_security, set_type,
-    set_unit, set_validation,
+    ScriptRename, TableAxis, add_tag, create_channel, create_constant, create_function,
+    create_group, create_parameter, create_scheduled_function, create_table, delete_component,
+    remove_tag, rename_component, script_relpath, set_call_rate, set_display_range, set_dps,
+    set_format, set_quantity, set_security, set_type, set_unit, set_validation,
 };
 pub use query::{
     ComponentEntry, ScriptComponent, available_rates, list_components, resolve_trigger,
@@ -331,6 +333,87 @@ mod tests {
             newc < grandchild,
             "new channel must not be placed after the grandchild Sub.Tick"
         );
+    }
+
+    // ---- #39 create_constant / create_table ----------------------------------
+
+    #[test]
+    fn create_constant_writes_props_value() {
+        let out = create_constant(PRJ, "Root.Engine.Bus", "CAN Bus 1").unwrap();
+        parses(&out);
+        assert!(out.contains(r#"Classname="BuiltIn.Constant" Name="Root.Engine.Bus""#));
+        assert!(out.contains(r#"<Props Value="CAN Bus 1"/>"#));
+        // The insert introduces no new validate() findings.
+        assert_eq!(validate(&out).unwrap().len(), validate(PRJ).unwrap().len());
+    }
+
+    #[test]
+    fn create_constant_rejects_duplicate_and_empty_value() {
+        assert!(matches!(
+            create_constant(PRJ, "Root.Engine.Speed", "x"),
+            Err(EditError::Duplicate(_))
+        ));
+        assert!(matches!(
+            create_constant(PRJ, "Root.Engine.Bus", "  "),
+            Err(EditError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn create_table_relativizes_absolute_axis_source() {
+        let axes = [TableAxis {
+            source: "Root.Engine.Speed".into(),
+            sites: Some(11),
+        }];
+        let out = create_table(PRJ, "Root.Engine.Pedal Map", &axes, Some("Tune")).unwrap();
+        parses(&out);
+        assert!(out.contains(r#"Classname="BuiltIn.Table" Name="Root.Engine.Pedal Map""#));
+        assert!(out.contains(r#"<Props Security="Tune" NumAxes="1">"#));
+        // `Root.Engine.Speed` from `Root.Engine.Pedal Map` is one climb + leaf,
+        // the same group-relative form SelectedTrigger uses.
+        assert!(out.contains(r#"<X Source="Parent.Speed" MaxSites="11"/>"#));
+        assert_eq!(validate(&out).unwrap().len(), validate(PRJ).unwrap().len());
+    }
+
+    #[test]
+    fn create_table_three_axes_passthrough_relative_sources() {
+        let axes = [
+            TableAxis {
+                source: "Root.Engine.Speed".into(),
+                sites: Some(11),
+            },
+            TableAxis {
+                source: "Parent.Plain".into(),
+                sites: Some(5),
+            },
+            TableAxis {
+                source: "Parent.Parent.Events.On 100Hz".into(),
+                sites: None,
+            },
+        ];
+        let out = create_table(PRJ, "Root.Engine.Map", &axes, None).unwrap();
+        parses(&out);
+        assert!(out.contains(r#"NumAxes="3""#));
+        assert!(out.contains(r#"<Y Source="Parent.Plain" MaxSites="5"/>"#));
+        assert!(out.contains(r#"<Z Source="Parent.Parent.Events.On 100Hz"/>"#));
+    }
+
+    #[test]
+    fn create_table_rejects_bad_axes() {
+        // No axes at all.
+        assert!(matches!(
+            create_table(PRJ, "Root.Engine.M2", &[], None),
+            Err(EditError::Invalid(_))
+        ));
+        // An absolute source that doesn't exist in the project.
+        let missing = [TableAxis {
+            source: "Root.Engine.Nope".into(),
+            sites: None,
+        }];
+        assert!(matches!(
+            create_table(PRJ, "Root.Engine.M3", &missing, None),
+            Err(EditError::Invalid(_))
+        ));
     }
 
     // ---- #21 create_group ---------------------------------------------------
