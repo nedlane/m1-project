@@ -20,6 +20,13 @@ pub struct ComponentEntry {
     pub security: Option<String>,
     /// Call rate trigger (`<Props SelectedTrigger>`), if present.
     pub call_rate: Option<String>,
+    /// Physical quantity (`<Props Qty>`), if present — `set-quantity`'s read-back (#43).
+    pub qty: Option<String>,
+    /// User tags (`<Props><List.UserTags><Entry Value>`), in document order —
+    /// `add-tag`'s read-back (#43).
+    pub tags: Vec<String>,
+    /// Component comment (the `<Comment>` CDATA text), if non-empty (#43).
+    pub comment: Option<String>,
     /// Depth in the path hierarchy (number of dots in `path`).
     pub depth: usize,
 }
@@ -55,6 +62,31 @@ pub fn list_components(xml: &str) -> Result<Vec<ComponentEntry>, EditError> {
             })
             .and_then(|d| d.attribute("Unit"))
             .map(str::to_string);
+        let qty = props.and_then(|p| p.attribute("Qty")).map(str::to_string);
+        let tags: Vec<String> = props
+            .and_then(|p| p.children().find(|c| c.has_tag_name("List.UserTags")))
+            .map(|t| {
+                t.children()
+                    .filter(|e| e.has_tag_name("Entry"))
+                    .filter_map(|e| e.attribute("Value"))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The comment is stored as CDATA on its own line (M1-Build's layout:
+        // `<Comment>\n<![CDATA[…]]>\n  </Comment>`), so concatenate all text
+        // children and trim the layout newlines.
+        let comment = n
+            .children()
+            .find(|c| c.has_tag_name("Comment"))
+            .map(|c| {
+                c.children()
+                    .filter_map(|t| t.text())
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty());
         let depth = path.matches('.').count();
         out.push(ComponentEntry {
             path: path.to_string(),
@@ -63,6 +95,9 @@ pub fn list_components(xml: &str) -> Result<Vec<ComponentEntry>, EditError> {
             unit,
             security,
             call_rate,
+            qty,
+            tags,
+            comment,
             depth,
         });
     }

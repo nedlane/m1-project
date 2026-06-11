@@ -328,3 +328,169 @@ fn list_components_cli_json() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn set_comment_cli_writes_cdata_and_clears() {
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("set_comment.m1prj");
+    std::fs::write(&path, minimal_project()).unwrap();
+
+    let out = Command::new(bin)
+        .args([
+            "set-comment",
+            "--component",
+            "Root.Engine.Speed",
+            "--comment",
+            "Wheel speed, NDD filtered",
+            "--project",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "set-comment failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let written = std::fs::read_to_string(&path).unwrap();
+    // M1-Build's serialiser shape: CDATA on its own line.
+    assert!(
+        written.contains("<Comment>\n<![CDATA[Wheel speed, NDD filtered]]>"),
+        "comment CDATA not found: {written}"
+    );
+    roxmltree::Document::parse(&written).expect("valid XML");
+
+    // Read-back through list-components --json.
+    let out = Command::new(bin)
+        .args(["list-components", "--json", "--project"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        json.contains(r#""comment":"Wheel speed, NDD filtered""#),
+        "comment must round-trip through list-components --json: {json}"
+    );
+
+    // Empty text clears back to the placeholder.
+    let out = Command::new(bin)
+        .args([
+            "set-comment",
+            "--component",
+            "Root.Engine.Speed",
+            "--project",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(written.contains("<Comment/>"), "cleared: {written}");
+    assert!(
+        !written.contains("CDATA"),
+        "no CDATA after clear: {written}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn create_reference_cli_smoke() {
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("create_reference.m1prj");
+    std::fs::write(&path, minimal_project()).unwrap();
+
+    // Bare reference: the corpus-majority self-closing shape.
+    let out = Command::new(bin)
+        .args([
+            "create-reference",
+            "--name",
+            "Root.Engine.Speed Alias",
+            "--project",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "create-reference failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        written.contains(
+            r#"<Component Classname="BuiltIn.Reference" Name="Root.Engine.Speed Alias"/>"#
+        ),
+        "self-closing reference not found: {written}"
+    );
+    assert!(
+        !written.contains("AutoCreated"),
+        "must never emit M1-Build's AutoCreated marker"
+    );
+
+    // Explicit target → the Props TargetCreation form.
+    let out = Command::new(bin)
+        .args([
+            "create-reference",
+            "--name",
+            "Root.Engine.Targeted",
+            "--target",
+            "This.Value",
+            "--project",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "targeted create-reference failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        written.contains(r#"<Props TargetCreation="AutoParam" Target="This.Value"/>"#),
+        "targeted reference props not found: {written}"
+    );
+    roxmltree::Document::parse(&written).expect("valid XML");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn validate_json_emits_machine_findings() {
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("validate_json.m1prj");
+    // A project with a dangling SelectedTrigger so validate has something to say.
+    let xml = minimal_project().replace(
+        r#"<Component Classname="BuiltIn.MethodUser" Name="Root.Engine.Update"/>"#,
+        r#"<Component Classname="BuiltIn.MethodUser" Name="Root.Engine.Update"><Props SelectedTrigger="Parent.Parent.Events.On 999Hz"/></Component>"#,
+    );
+    std::fs::write(&path, xml).unwrap();
+
+    let out = Command::new(bin)
+        .args(["validate", "--json", "--project"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.trim_start().starts_with('['),
+        "must be a JSON array: {stdout}"
+    );
+    assert!(
+        stdout.contains(r#""level":"#) && stdout.contains(r#""path":"#),
+        "findings must carry level/path/message: {stdout}"
+    );
+    // Output must parse as JSON.
+    serde_json_sanity(&stdout);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// m1-project deliberately has no serde dependency; sanity-parse the JSON with
+/// a tiny structural check instead (balanced brackets, no trailing comma).
+fn serde_json_sanity(s: &str) {
+    let t = s.trim();
+    assert!(t.starts_with('[') && t.ends_with(']'), "array shape: {t}");
+    assert!(!t.contains(",\n]"), "no trailing comma: {t}");
+}

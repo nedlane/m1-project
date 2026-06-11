@@ -83,9 +83,10 @@ mod xml;
 
 pub use edits::{
     ScriptRename, TableAxis, add_tag, create_channel, create_constant, create_function,
-    create_group, create_parameter, create_scheduled_function, create_table, delete_component,
-    remove_tag, rename_component, script_relpath, set_call_rate, set_display_range, set_dps,
-    set_format, set_quantity, set_security, set_type, set_unit, set_validation,
+    create_group, create_parameter, create_reference, create_scheduled_function, create_table,
+    delete_component, remove_tag, rename_component, script_relpath, set_call_rate, set_comment,
+    set_display_range, set_dps, set_format, set_quantity, set_security, set_type, set_unit,
+    set_validation,
 };
 pub use query::{
     ComponentEntry, ScriptComponent, available_rates, list_components, resolve_trigger,

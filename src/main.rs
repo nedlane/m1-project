@@ -109,6 +109,18 @@ enum Command {
         #[arg(long)]
         security: Option<String>,
     },
+    /// Create a new BuiltIn.Reference (an alias to a channel defined elsewhere).
+    CreateReference {
+        #[arg(long)]
+        project: PathBuf,
+        /// Fully-qualified name, e.g. `Root.Driver.Brake Pressure`.
+        #[arg(long)]
+        name: String,
+        /// Optional explicit target (component-relative, e.g. `This.Value`);
+        /// omitted for the usual name-implied reference.
+        #[arg(long)]
+        target: Option<String>,
+    },
     /// Create a new BuiltIn.FuncUser scheduled function (creates its .m1scr too).
     CreateScheduledFunction {
         #[arg(long)]
@@ -231,6 +243,16 @@ enum Command {
         #[arg(long, allow_hyphen_values = true)]
         max: f64,
     },
+    /// Set or clear a component's comment (the *Comment* row; empty text clears it).
+    SetComment {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        component: String,
+        /// The comment text (stored as CDATA; may contain M1-Build rich-text HTML).
+        #[arg(long, default_value = "")]
+        comment: String,
+    },
     /// Add a user tag to a component (the *Tags* row; fixes "Mandatory tag not selected").
     AddTag {
         #[arg(long)]
@@ -268,6 +290,9 @@ enum Command {
     Validate {
         #[arg(long)]
         project: PathBuf,
+        /// Emit JSON (array of objects with level/path/message) instead of text.
+        #[arg(long)]
+        json: bool,
     },
     /// List all components in the project.
     ListComponents {
@@ -291,6 +316,7 @@ impl Command {
             | Command::CreateParameter { project, .. }
             | Command::CreateConstant { project, .. }
             | Command::CreateTable { project, .. }
+            | Command::CreateReference { project, .. }
             | Command::CreateScheduledFunction { project, .. }
             | Command::CreateFunction { project, .. }
             | Command::DeleteComponent { project, .. }
@@ -299,6 +325,7 @@ impl Command {
             | Command::SetType { project, .. }
             | Command::SetUnit { project, .. }
             | Command::SetQuantity { project, .. }
+            | Command::SetComment { project, .. }
             | Command::SetValidation { project, .. }
             | Command::SetFormat { project, .. }
             | Command::SetDps { project, .. }
@@ -339,7 +366,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
             return Ok(ExitCode::SUCCESS);
         }
-        Validate { project } => {
+        Validate { project, json } => {
             let (xml, _enc) = m1_workspace::read_text_with_encoding(project)
                 .map_err(|e| format!("{}: {e}", project.display()))?;
             let mut findings = m1_project::validate(&xml)?;
@@ -356,15 +383,37 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 .iter()
                 .filter(|f| f.level == m1_project::FindingLevel::Warning)
                 .count();
-            for f in &findings {
-                println!("{f}");
+            if *json {
+                // One object per finding, machine-consumable (#42). Same
+                // hand-rolled JSON helpers as list-components; exit semantics
+                // unchanged (1 on errors).
+                println!("[");
+                for (i, f) in findings.iter().enumerate() {
+                    let comma = if i + 1 < findings.len() { "," } else { "" };
+                    let level = match f.level {
+                        m1_project::FindingLevel::Error => "error",
+                        m1_project::FindingLevel::Warning => "warning",
+                    };
+                    println!(
+                        "  {{\"level\":{},\"path\":{},\"message\":{}}}{}",
+                        json_string(level),
+                        json_string(&f.path),
+                        json_string(&f.message),
+                        comma
+                    );
+                }
+                println!("]");
+            } else {
+                for f in &findings {
+                    println!("{f}");
+                }
+                println!(
+                    "{} finding(s): {} error(s), {} warning(s)",
+                    findings.len(),
+                    errors,
+                    warnings
+                );
             }
-            println!(
-                "{} finding(s): {} error(s), {} warning(s)",
-                findings.len(),
-                errors,
-                warnings
-            );
             return Ok(if errors > 0 {
                 ExitCode::FAILURE
             } else {
@@ -384,14 +433,27 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     let unit_json = json_string_or_null(e.unit.as_deref());
                     let sec_json = json_string_or_null(e.security.as_deref());
                     let cr_json = json_string_or_null(e.call_rate.as_deref());
+                    let qty_json = json_string_or_null(e.qty.as_deref());
+                    let tags_json = format!(
+                        "[{}]",
+                        e.tags
+                            .iter()
+                            .map(|t| json_string(t))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
+                    let comment_json = json_string_or_null(e.comment.as_deref());
                     println!(
-                        "  {{\"path\":{},\"classname\":{},\"type\":{},\"unit\":{},\"security\":{},\"call_rate\":{}}}{}",
+                        "  {{\"path\":{},\"classname\":{},\"type\":{},\"unit\":{},\"security\":{},\"call_rate\":{},\"qty\":{},\"tags\":{},\"comment\":{}}}{}",
                         json_string(&e.path),
                         json_string(&e.classname),
                         ty_json,
                         unit_json,
                         sec_json,
                         cr_json,
+                        qty_json,
+                        tags_json,
+                        comment_json,
                         comma
                     );
                 }
@@ -413,6 +475,12 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     }
                     if let Some(s) = &e.security {
                         props.push(format!("security={s}"));
+                    }
+                    if let Some(q) = &e.qty {
+                        props.push(format!("qty={q}"));
+                    }
+                    if !e.tags.is_empty() {
+                        props.push(format!("tags={}", e.tags.join("+")));
                     }
                     let segment = e.path.rsplit('.').next().unwrap_or(&e.path);
                     println!("{indent}{segment}  [{}]", props.join(", "));
@@ -499,6 +567,9 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             m1_project::create_table(&xml, name, &axes, security.as_deref())?
         }
         CreateGroup { name, .. } => m1_project::create_group(&xml, name)?,
+        CreateReference { name, target, .. } => {
+            m1_project::create_reference(&xml, name, target.as_deref())?
+        }
         CreateScheduledFunction { name, .. } => m1_project::create_scheduled_function(&xml, name)?,
         CreateFunction { name, .. } => m1_project::create_function(&xml, name)?,
         DeleteComponent {
@@ -523,6 +594,9 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             quantity,
             ..
         } => m1_project::set_quantity(&xml, component, quantity)?,
+        SetComment {
+            component, comment, ..
+        } => m1_project::set_comment(&xml, component, comment)?,
         SetValidation {
             component,
             r#type,

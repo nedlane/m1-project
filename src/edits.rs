@@ -899,6 +899,85 @@ pub fn set_quantity(xml: &str, component: &str, qty: &str) -> Result<String, Edi
     set_props_attr(xml, component, "Qty", qty)
 }
 
+/// Set (or replace) a component's **Comment** — the description M1-Build shows in
+/// the *Comment* row. Stored the way M1-Build's serialiser writes it: a CDATA
+/// block on its own line starting in the first column,
+/// `<Comment>\n<![CDATA[text]]>\n  </Comment>` (the corpus form; the text may be
+/// HTML, e.g. `<p>`/`<strong>` from M1-Build's rich-text editor). An empty
+/// `text` clears back to the `<Comment/>` placeholder (#44).
+pub fn set_comment(xml: &str, component: &str, text: &str) -> Result<String, EditError> {
+    let new_element = |indent: &str| {
+        if text.is_empty() {
+            "<Comment/>".to_string()
+        } else {
+            // A literal `]]>` inside CDATA must be split across two sections —
+            // the standard CDATA escape.
+            let escaped = text.replace("]]>", "]]]]><![CDATA[>");
+            format!("<Comment>\n<![CDATA[{escaped}]]>\n{indent}</Comment>")
+        }
+    };
+
+    // Replace the existing <Comment> in place.
+    if let Some(range) = comment_range(xml, component)? {
+        let indent = indent_at(xml, range.start).to_string();
+        return Ok(splice(xml, range, &new_element(&indent)));
+    }
+
+    // No <Comment> yet (hand-edited or self-closing component): add one as the
+    // last child, where the create verbs and M1-Build's serialiser put it.
+    let loc = locate(xml, component)?;
+    let elem = &xml[loc.range.clone()];
+    let indent = indent_at(xml, loc.range.start).to_string();
+    let child_indent = format!("{indent} ");
+    if elem.trim_end().ends_with("/>") {
+        let open = elem
+            .trim_end()
+            .strip_suffix("/>")
+            .expect("checked by ends_with(\"/>\") above");
+        let new = format!(
+            "{open}>\n{child_indent}{}\n{indent}</Component>",
+            new_element(&child_indent)
+        );
+        Ok(splice(xml, loc.range, &new))
+    } else {
+        // Insert before </Component>, replacing the whitespace run that
+        // precedes the close tag so the layout stays M1-Build-shaped.
+        let close = elem
+            .rfind("</Component>")
+            .ok_or_else(|| EditError::Invalid("malformed <Component>".into()))?;
+        let abs = loc.range.start + close;
+        let trimmed_end = loc.range.start + elem[..close].trim_end().len();
+        Ok(splice(
+            xml,
+            trimmed_end..abs,
+            &format!("\n{child_indent}{}\n{indent}", new_element(&child_indent)),
+        ))
+    }
+}
+
+/// Create a `BuiltIn.Reference` under its (existing) parent group — the alias
+/// mechanism that surfaces a channel defined elsewhere (175 of them in the EV
+/// corpus). The user-authored corpus shape is a bare self-closing component; an
+/// explicit `target` adds the `<Props TargetCreation="AutoParam" Target="…"/>`
+/// form (targets are component-relative, e.g. `This.Value`). `Caps="AutoCreated"`
+/// is never emitted — that marker belongs to M1-Build's own companions (#45).
+pub fn create_reference(xml: &str, name: &str, target: Option<&str>) -> Result<String, EditError> {
+    validate_name_segment(name)?;
+    if let Some(t) = target
+        && t.trim().is_empty()
+    {
+        return Err(EditError::Invalid("target must not be empty".into()));
+    }
+    insert_component(xml, name, "BuiltIn.Reference", "", |indent| {
+        target.map(|t| {
+            format!(
+                "\n{indent} <Props TargetCreation=\"AutoParam\" Target=\"{}\"/>",
+                xml_escape(t)
+            )
+        })
+    })
+}
+
 /// Set the *Validation* of a value component (the M1-Build *Validation* section).
 /// `kind` is `MinMax` (then `min`/`max` are required) or `None`/`none` (clears the
 /// `Validation`/`ValMin`/`ValMax` attributes). Bounds are written in the

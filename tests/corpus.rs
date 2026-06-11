@@ -240,3 +240,69 @@ fn create_group_under_a_real_group() {
     assert!(out.contains(&new), "new group must be in the output");
     assert_eq!(component_count(&out), component_count(&xml) + 1);
 }
+
+// ---- sweep-4 verbs against the real corpus -----------------------------------
+
+#[test]
+fn create_reference_under_a_real_group() {
+    let Some(xml) = corpus_project() else {
+        eprintln!("corpus absent; skipping");
+        return;
+    };
+    let group = components_of_class(&xml, "BuiltIn.GroupCompound")
+        .into_iter()
+        .next()
+        .expect("corpus has a group");
+    let new = format!("{group}.M1ProjectSmokeTestReference");
+    let out = m1_project::create_reference(&xml, &new, None).unwrap();
+    roxmltree::Document::parse(&out).expect("result must be valid XML");
+    assert!(out.contains(&new));
+    assert_eq!(component_count(&out), component_count(&xml) + 1);
+    // No new validate findings on the real project.
+    assert_eq!(
+        m1_project::validate(&out).unwrap().len(),
+        m1_project::validate(&xml).unwrap().len()
+    );
+}
+
+#[test]
+fn set_comment_on_a_real_channel_round_trips() {
+    let Some(xml) = corpus_project() else {
+        return;
+    };
+    let ch = components_of_class(&xml, "BuiltIn.Channel")
+        .into_iter()
+        .next()
+        .expect("corpus has a channel");
+    let out = m1_project::set_comment(&xml, &ch, "smoke-test comment").unwrap();
+    roxmltree::Document::parse(&out).expect("valid XML");
+    assert_eq!(component_count(&out), component_count(&xml));
+    // Read-back through list_components.
+    let entries = m1_project::list_components(&out).unwrap();
+    let entry = entries.iter().find(|e| e.path == ch).unwrap();
+    assert_eq!(entry.comment.as_deref(), Some("smoke-test comment"));
+    // Clearing restores the placeholder and drops the read-back.
+    let cleared = m1_project::set_comment(&out, &ch, "").unwrap();
+    let entries = m1_project::list_components(&cleared).unwrap();
+    let entry = entries.iter().find(|e| e.path == ch).unwrap();
+    assert_eq!(entry.comment, None);
+}
+
+#[test]
+fn list_components_reads_back_qty_and_tags_on_the_corpus() {
+    let Some(xml) = corpus_project() else {
+        return;
+    };
+    let entries = m1_project::list_components(&xml).unwrap();
+    // The EV corpus tags many components (List.UserTags Entry values) — the
+    // read-back must surface at least one of them.
+    assert!(
+        entries.iter().any(|e| !e.tags.is_empty()),
+        "corpus has tagged components; tags read-back must see them"
+    );
+    // And the corpus carries CDATA comments ("This must be copied", …).
+    assert!(
+        entries.iter().any(|e| e.comment.is_some()),
+        "corpus has commented components; comment read-back must see them"
+    );
+}

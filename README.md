@@ -27,6 +27,10 @@ m1-project create-channel   --project <Project.m1prj> --name <Root.Group.Name>
                             [--type f32] [--unit rpm] [--security Tune]
 m1-project create-parameter --project <p> --name <Root.Group.Name>
                             [--type f32] [--unit rpm] [--security Tune]
+m1-project create-constant  --project <p> --name <Root.Group.Name> --value <V>
+m1-project create-table     --project <p> --name <Root.Group.Name> --axis-x <Root.Src> [--x-sites N]
+                            [--axis-y <Root.Src> [--y-sites N] [--axis-z <Root.Src>]] [--security Tune]
+m1-project create-reference --project <p> --name <Root.Group.Alias> [--target This.Value]
 m1-project create-group              --project <p> --name <Root.Group.NewSubsystem>
 m1-project create-function           --project <p> --name <Root.Group.Name>  # FuncUserParam + .m1scr
 m1-project create-scheduled-function --project <p> --name <Root.Group.Name>  # FuncUser + .m1scr
@@ -40,13 +44,14 @@ m1-project set-dps        --project <p> --component <Root.X> --dps <N>
 m1-project set-display-range --project <p> --component <Root.X> --min <f> --max <f>
 m1-project add-tag        --project <p> --component <Root.X> --tag <Tag>
 m1-project remove-tag     --project <p> --component <Root.X> --tag <Tag>
+m1-project set-comment    --project <p> --component <Root.X> --comment <text>  # empty clears
 m1-project set-call-rate  --project <p> --script <Root.Group.Script> --rate <N|startup>
 m1-project list-rates     --project <p>     # the On <N>Hz clocks available, one per line
 
 m1-project delete-component --project <p> --name <Root.X> [--recursive] [--force]
 m1-project rename-component --project <p> --name <Root.X> --new-name <Y>
-m1-project validate         --project <p>   # read-only structural check; exit 1 on errors
-m1-project list-components  --project <p> [--json]
+m1-project validate         --project <p> [--json]   # read-only structural check; exit 1 on errors
+m1-project list-components  --project <p> [--json]   # JSON carries type/unit/security/call_rate/qty/tags/comment
 ```
 
 Global flags: `--dry-run` (print the modified project to stdout, don't write) and
@@ -91,6 +96,15 @@ Global flags: `--dry-run` (print the modified project to stdout, don't write) an
     most common finding, *Mandatory tag not selected* (Warning 1142/1549);
     `add-tag` is the fix. (Tags inherited from a parent group are not repeated in
     the child's XML; `add-tag` writes an explicit per-component tag.)
+  - `set-comment` → the `<Comment>` element, stored as a CDATA block on its own
+    line (M1-Build's serialiser shape; the text may carry M1-Build rich-text
+    HTML). An empty `--comment` clears back to the `<Comment/>` placeholder.
+  - `create-reference` → `BuiltIn.Reference`, the alias mechanism (175 of them in
+    a real project). Default is the bare self-closing corpus shape (target
+    implied by the name); `--target` writes
+    `<Props TargetCreation="AutoParam" Target="…"/>` (component-relative, e.g.
+    `This.Value`). `Caps="AutoCreated"` is never emitted — that marker belongs
+    to M1-Build's own generated companions.
 - **Validate:** all findings are printed (no fail-fast). Structural checks (pure,
   on the XML): well-formed/decodable XML, duplicate sibling names, every
   `SelectedTrigger` resolving to a real `BuiltIn.EventKernel` clock (`$(…)`

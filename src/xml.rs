@@ -168,6 +168,19 @@ pub(crate) fn user_tags_range(
         .map(|n| n.range()))
 }
 
+/// The byte range of this component's `<Comment>` child element, if present.
+pub(crate) fn comment_range(
+    xml: &str,
+    component: &str,
+) -> Result<Option<std::ops::Range<usize>>, EditError> {
+    let doc = parse_xml(xml)?;
+    let comp = parse_and_find(&doc, component)?;
+    Ok(comp
+        .children()
+        .find(|c| c.has_tag_name("Comment"))
+        .map(|n| n.range()))
+}
+
 /// Ensure the component has a `<Props>` child; if it is `<Component …/>`
 /// (self-closing) rewrite it to `<Component …><Props/></Component>`.
 pub(crate) fn ensure_props(xml: &str, component: &str) -> Result<String, EditError> {
