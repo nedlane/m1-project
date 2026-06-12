@@ -64,9 +64,11 @@ and flags:
   error numbers), so CI can catch what M1-Build would flag before the project
   ever opens there.
 
-Global flags: `--dry-run` (print the result, write nothing) and `--stdout`;
-without either, the file is edited in place (atomically). JSON output is
-available where it makes sense for scripting.
+Global flags: `--dry-run` previews the edit as a unified diff (and reports the
+side effects it would perform, like script renames) while `--stdout` prints
+the resulting XML for piping — neither touches any file. Without either, the
+file is edited in place (atomically). JSON output is available where it makes
+sense for scripting.
 
 ## Development
 
