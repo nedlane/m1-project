@@ -1,135 +1,80 @@
 # m1-project
 
-A small CLI that makes **structured, validated edits** to a MoTeC M1
-`Project.m1prj` — so a developer can create channels, change a component's
-permissions / unit / type, and set a script's execution rate **from the editor**
-instead of hand-editing a large XML file and guessing the conventions.
+A CLI that makes **structured, validated edits** to a MoTeC M1
+`Project.m1prj` — create channels, parameters, tables, groups and scripts,
+change a component's permissions / unit / type, set a script's execution rate
+— **from the editor** instead of hand-editing a large XML file and guessing
+the conventions.
 
-It is the write-side companion to the read-only [`m1-lsp`](https://github.com/C-Nucifora/m1-lsp)
-language server: the LSP keeps serving reads (hover, go-to-def, diagnostics), and
-`m1-project` owns the mutations. The [m1-vscode](https://github.com/nedlane/m1-vscode)
-extension and the [nvim-m1](https://github.com/C-Nucifora/nvim-m1) plugin both invoke
-this binary, so the same edits are available in either editor.
+It is the write-side companion to the read-only
+[m1-lsp](https://github.com/C-Nucifora/m1-lsp) language server: the LSP keeps
+serving reads (hover, go-to-def, diagnostics), and `m1-project` owns the
+mutations. The [m1-vscode](https://github.com/nedlane/m1-vscode) extension and
+the [nvim-m1](https://github.com/C-Nucifora/nvim-m1) plugin both invoke this
+binary, so the same edits are available in either editor.
 
 ## Why a separate tool
 
-The `.m1prj` is a large XML file that **MoTeC M1-Build also writes**. To stay out of
-its way, every edit here is **surgical**: the target element is located byte-accurately
-with `roxmltree` and the smallest possible text change is spliced in, leaving the rest
-of the file — formatting, comments, attribute order — untouched. Edits are validated
-(valid security levels, known types, no duplicate names, the target clock exists) so an
-invalid project can't be produced.
+The `.m1prj` is a large XML file that **MoTeC M1-Build also writes**. To stay
+out of its way, every edit here is **surgical**: the target element is located
+byte-accurately and the smallest possible text change is spliced in, leaving
+the rest of the file — formatting, comments, attribute order — untouched. And
+every edit writes **exactly the shape M1-Build itself writes** (the same
+element bodies, number formats, and view-tree bookkeeping), so a project
+edited here looks to M1-Build like one it edited itself.
 
-## Commands
+Edits are validated (valid security levels, known types, no duplicate names,
+the target clock exists), so an invalid project can't be produced.
 
-```
-m1-project create-channel   --project <Project.m1prj> --name <Root.Group.Name>
-                            [--type f32] [--unit rpm] [--security Tune]
-m1-project create-parameter --project <p> --name <Root.Group.Name>
-                            [--type f32] [--unit rpm] [--security Tune]
-m1-project create-constant  --project <p> --name <Root.Group.Name> --value <V>
-m1-project create-table     --project <p> --name <Root.Group.Name> --axis-x <Root.Src> [--x-sites N]
-                            [--axis-y <Root.Src> [--y-sites N] [--axis-z <Root.Src>]] [--security Tune]
-m1-project create-reference --project <p> --name <Root.Group.Alias> [--target This.Value]
-m1-project create-group              --project <p> --name <Root.Group.NewSubsystem>
-m1-project create-function           --project <p> --name <Root.Group.Name>  # FuncUserParam + .m1scr
-m1-project create-scheduled-function --project <p> --name <Root.Group.Name>  # FuncUser + .m1scr
-m1-project set-security   --project <p> --component <Root.X> --security <level>
-m1-project set-type       --project <p> --component <Root.X> --type <type>
-m1-project set-unit       --project <p> --component <Root.X> --unit <unit>
-m1-project set-quantity   --project <p> --component <Root.X> --quantity <ratio|rad/s|…>
-m1-project set-validation --project <p> --component <Root.X> [--type MinMax --min <f> --max <f> | --type None]
-m1-project set-format     --project <p> --component <Root.X> --format <Hex|Default|…>
-m1-project set-dps        --project <p> --component <Root.X> --dps <N>
-m1-project set-display-range --project <p> --component <Root.X> --min <f> --max <f>
-m1-project add-tag        --project <p> --component <Root.X> --tag <Tag>
-m1-project remove-tag     --project <p> --component <Root.X> --tag <Tag>
-m1-project set-comment    --project <p> --component <Root.X> --comment <text>  # empty clears
-m1-project set-call-rate  --project <p> --script <Root.Group.Script> --rate <N|startup>
-m1-project list-rates     --project <p>     # the On <N>Hz clocks available, one per line
+## Install
 
-m1-project delete-component --project <p> --name <Root.X> [--recursive] [--force]
-m1-project rename-component --project <p> --name <Root.X> --new-name <Y>
-m1-project validate         --project <p> [--json]   # read-only structural check; exit 1 on errors
-m1-project list-components  --project <p> [--json]   # JSON carries type/unit/security/call_rate/qty/tags/comment
-```
-
-Global flags: `--dry-run` (print the modified project to stdout, don't write) and
-`--stdout` (write the result to stdout). Without either, the file is edited in place.
-
-- **Security levels:** `Tune`, `Calibration`, `Master Calibration`, `Resource`.
-- **Types:** `bool`, `u8`/`u16`/`u32`, `s8`/`s16`/`s32`, `f32`/`f64`, or an enum
-  reference (`::This.Foo`, `MoTeC Types.Bar`).
-- **Call rate:** `set-call-rate` writes the script's `<Props SelectedTrigger="…">`
-  pointing at the matching `Root.Events.On <N>Hz` clock — the trigger is group-relative
-  (`Parent.×N.Events.On <N>Hz`, one `Parent.` per path segment), exactly as M1-Build
-  encodes it. `--rate startup` selects `On Startup`; the clock must already exist
-  (`list-rates` shows what's available).
-- **Delete:** a component with children needs `--recursive`; deleting a clock that
-  other scripts' `SelectedTrigger`s resolve to is refused unless `--force` (the
-  refusal lists the referencing scripts).
-- **Create verbs** write exactly what M1-Build's *Insert → Built-in* writes: each
-  new component is added to both the `<List>` and the `<Organisation>` view tree
-  (M1-Build binds Properties through the latter), with the same bodies — a
-  `<Comment/>` for channels/parameters/groups, a `Filename` + empty `.m1scr` for
-  scheduled functions (`BuiltIn.FuncUser`), and a `Filename` + empty `<Signature>`
-  + `.m1scr` for functions (`BuiltIn.FuncUserParam`). The `.m1scr` is created under
-  the project's `Scripts/` directory.
-- **Rename:** renames the component and all descendants, rewrites every
-  `SelectedTrigger` that resolves into the renamed subtree, updates the
-  `<Organisation>` view node, and — for renamed script components — rewrites the
-  `Filename` and **renames the backing `.m1scr` on disk** (under `Scripts/`),
-  exactly as M1-Build's UI does. `--new-name` is a single leaf segment (no dots).
-- **Property setters from the Properties tab.** Beyond type/unit/security, these
-  mirror the M1-Build *Properties* rows and write exactly what M1-Build writes:
-  - `set-quantity` → `<Props Qty="…">` — the physical *Quantity* (e.g. `ratio`,
-    `rad/s`). Distinct from the display *unit*; if you change the quantity to a
-    different dimension, set a matching `--unit` too, or M1-Build reports
-    *Invalid display unit* (Error 1017).
-  - `set-validation` → `<Props Validation="MinMax" ValMin=… ValMax=…>` (bounds in
-    M1-Build's `%.17e` form), or `--type None` to clear all three.
-  - `set-format` / `set-dps` / `set-display-range` → the *Display* section
-    `<Locale><Default Format=… DPS=… Min=… Max=…>` (Min/Max in `%.17e`; these are
-    the display clamp, distinct from the Validation `ValMin`/`ValMax`).
-  - `add-tag` / `remove-tag` → `<Props><List.UserTags><Entry Value="Tag"/></List.UserTags>`,
-    the *Tags* row. A component missing a tag its class requires is M1-Build's
-    most common finding, *Mandatory tag not selected* (Warning 1142/1549);
-    `add-tag` is the fix. (Tags inherited from a parent group are not repeated in
-    the child's XML; `add-tag` writes an explicit per-component tag.)
-  - `set-comment` → the `<Comment>` element, stored as a CDATA block on its own
-    line (M1-Build's serialiser shape; the text may carry M1-Build rich-text
-    HTML). An empty `--comment` clears back to the `<Comment/>` placeholder.
-  - `create-reference` → `BuiltIn.Reference`, the alias mechanism (175 of them in
-    a real project). Default is the bare self-closing corpus shape (target
-    implied by the name); `--target` writes
-    `<Props TargetCreation="AutoParam" Target="…"/>` (component-relative, e.g.
-    `This.Value`). `Caps="AutoCreated"` is never emitted — that marker belongs
-    to M1-Build's own generated companions.
-- **Validate:** all findings are printed (no fail-fast). Structural checks (pure,
-  on the XML): well-formed/decodable XML, duplicate sibling names, every
-  `SelectedTrigger` resolving to a real `BuiltIn.EventKernel` clock (`$(…)`
-  expression triggers are skipped), `<List>`/`<Organisation>` consistency, and —
-  mirroring M1-Build — a scheduled function (`BuiltIn.FuncUser`) with **no event
-  selected** (Error, = M1-Build Error 1623) and a channel/parameter with **no
-  security group** (Error, = M1-Build Error 1601). The CLI additionally does one
-  file-aware check: a script component whose backing `.m1scr` **exists but is
-  empty** is *missing code* (= M1-Build Error 1024); an *absent* `.m1scr` is not a
-  finding (many library/base method slots — `Calculation`, `Transform`,
-  `SetState`, `Startup` — legitimately carry no project script, exactly as
-  M1-Build treats them). Not yet mirrored (they need cross-script dataflow or a
-  unit-dimension model, so they belong in `m1-typecheck`): *channel value not
-  assigned* (1627), *parameter value not read* (1631), *invalid display unit*
-  (1017).
-
-## Build
+Prebuilt binaries for Linux, macOS, and Windows are attached to each
+[release](https://github.com/nedlane/m1-project/releases) — the editor
+integrations fetch them automatically. Or build from source:
 
 ```sh
-cargo build --release        # target/release/m1-project
-cargo test                   # unit tests + (when the EV-M1 corpus is a sibling) corpus tests
+cargo install --git https://github.com/nedlane/m1-project.git --tag <latest>
 ```
 
-Prebuilt binaries (Linux/macOS/Windows) are attached to each GitHub Release; the editor
-extensions fetch them, so end users don't build from source.
+## Usage
+
+```sh
+m1-project create-channel --project Project.m1prj --name "Root.Driver.Throttle" --type f32 --unit %
+m1-project set-call-rate  --project Project.m1prj --script "Root.Engine.Control" --rate 100
+m1-project rename-component --project Project.m1prj --name "Root.Old" --new-name "New"
+m1-project validate       --project Project.m1prj          # read-only structural check
+m1-project list-components --project Project.m1prj --json  # machine-readable inventory
+```
+
+The verbs fall into four groups — run `m1-project --help` for the full list
+and flags:
+
+- **`create-*`** — channels, parameters, constants, tables, references,
+  groups, and (scheduled) functions, including the backing `.m1scr` where
+  M1-Build would create one.
+- **`set-*` / `add-tag` / `remove-tag`** — the M1-Build *Properties* rows:
+  security, type, unit, physical quantity, validation bounds, display
+  format, tags, comments, and script call rate.
+- **`delete-component` / `rename-component`** — structure edits with the
+  bookkeeping M1-Build does (rename rewrites triggers that resolve into the
+  subtree and renames the backing `.m1scr` on disk; delete refuses to orphan
+  referencing scripts unless `--force`).
+- **`validate` / `list-components` / `list-rates`** — read-only queries.
+  `validate` mirrors M1-Build's own structural findings (referencing its
+  error numbers), so CI can catch what M1-Build would flag before the project
+  ever opens there.
+
+Global flags: `--dry-run` (print the result, write nothing) and `--stdout`;
+without either, the file is edited in place (atomically). JSON output is
+available where it makes sense for scripting.
+
+## Development
+
+The CI gate is `cargo test`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo fmt --all -- --check`. Corpus tests run against a real project checkout
+when one is present as a sibling, and skip otherwise. Checks that need
+cross-script dataflow or a unit-dimension model deliberately live in
+[m1-typecheck](https://github.com/C-Nucifora/m1-typecheck), not here.
 
 ## License
 
