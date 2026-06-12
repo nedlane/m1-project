@@ -17,10 +17,12 @@ use std::process::ExitCode;
 struct Cli {
     #[command(subcommand)]
     command: Command,
-    /// Print the modified project to stdout instead of writing the file.
+    /// Preview: print a unified diff of what would change (and report skipped
+    /// side effects like script renames) without touching any file.
     #[arg(long, global = true)]
     dry_run: bool,
-    /// Write the result to stdout instead of back to the project file.
+    /// Output routing: write the resulting XML to stdout instead of back to
+    /// the project file (side effects like script renames are skipped).
     #[arg(long, global = true)]
     stdout: bool,
 }
@@ -501,13 +503,26 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     // general edit/write flow.
     if let RenameComponent { name, new_name, .. } = &cli.command {
         let (out, script_renames) = m1_project::rename_component(&xml, name, new_name)?;
-        let code = write_or_print(cli, project, &xml, &out)?;
-        // On a real write, rename the backing .m1scr files to follow the component
-        // (M1-Build does this in its UI). --dry-run/--stdout leave the disk alone.
+        // On a real write the backing .m1scr files are renamed FIRST (with
+        // rollback on partial failure), and the XML only after every rename
+        // succeeded (#49): a failure at any point leaves the old, loadable
+        // project intact. --dry-run/--stdout leave the disk alone.
         if !cli.dry_run && !cli.stdout {
-            rename_script_files(project, &script_renames)?;
+            let done = rename_script_files(project, &script_renames)?;
+            return match write_or_print(cli, project, &xml, &out) {
+                Ok(code) => Ok(code),
+                Err(e) => {
+                    rollback_renames(project, &done);
+                    Err(e)
+                }
+            };
         }
-        return Ok(code);
+        if cli.dry_run {
+            for r in &script_renames {
+                eprintln!("dry-run: would rename {} -> {}", r.old, r.new);
+            }
+        }
+        return write_or_print(cli, project, &xml, &out);
     }
 
     let out = match &cli.command {
@@ -694,18 +709,32 @@ fn create_script_file(project: &Path, name: &str) -> Result<(), Box<dyn std::err
 }
 
 /// Rename backing `.m1scr` files to follow a `rename_component` (old → new),
-/// matching M1-Build's UI. Skips any whose source file is absent.
+/// matching M1-Build's UI. Skips any whose source file is absent. Runs BEFORE
+/// the XML write (#49); on a mid-loop failure every completed rename is rolled
+/// back so the project (old XML + old filenames) stays loadable. Returns the
+/// renames actually performed so the caller can roll back if the XML write
+/// itself fails.
 fn rename_script_files(
     project: &Path,
     renames: &[m1_project::ScriptRename],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Vec<m1_project::ScriptRename>, Box<dyn std::error::Error>> {
     let dir = scripts_dir(project);
+    let mut done: Vec<m1_project::ScriptRename> = Vec::new();
     for r in renames {
         let from = dir.join(&r.old);
         let to = dir.join(&r.new);
         if from.exists() {
-            std::fs::rename(&from, &to)?;
+            if let Err(e) = std::fs::rename(&from, &to) {
+                rollback_renames(project, &done);
+                return Err(format!(
+                    "renaming {} -> {} failed ({e}); previous renames rolled back, project unchanged",
+                    from.display(),
+                    to.display()
+                )
+                .into());
+            }
             eprintln!("Renamed {} -> {}", from.display(), to.display());
+            done.push(r.clone());
         } else {
             eprintln!(
                 "warning: backing script not found, skipped: {}",
@@ -713,18 +742,47 @@ fn rename_script_files(
             );
         }
     }
-    Ok(())
+    Ok(done)
 }
 
-/// Either print to stdout (dry-run / --stdout) or write back to the project file.
+/// Undo completed `.m1scr` renames (new → old), best-effort: each failure is
+/// reported but does not stop the remaining rollbacks.
+fn rollback_renames(project: &Path, done: &[m1_project::ScriptRename]) {
+    let dir = scripts_dir(project);
+    for r in done.iter().rev() {
+        let from = dir.join(&r.new);
+        let to = dir.join(&r.old);
+        if let Err(e) = std::fs::rename(&from, &to) {
+            eprintln!(
+                "warning: rollback of {} -> {} failed: {e}",
+                from.display(),
+                to.display()
+            );
+        } else {
+            eprintln!("Rolled back {} -> {}", from.display(), to.display());
+        }
+    }
+}
+
+/// Route the edited XML: `--stdout` prints the raw result, `--dry-run` prints
+/// a unified diff of what would change (#51), otherwise write back to the
+/// project file.
 fn write_or_print(
     cli: &Cli,
     project: &Path,
-    _original: &str,
+    original: &str,
     out: &str,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    if cli.dry_run || cli.stdout {
+    if cli.stdout {
         print!("{out}");
+    } else if cli.dry_run {
+        let name = project.display().to_string();
+        let diff = m1_workspace::diff::unified_diff(&name, original, out);
+        if diff.is_empty() {
+            eprintln!("dry-run: no changes to {name}");
+        } else {
+            print!("{diff}");
+        }
     } else {
         // Defense in depth: never write XML that isn't well-formed. The surgical
         // edits are parser-located and validated by tests, but re-parsing the
@@ -778,10 +836,30 @@ fn motec_write_encoding(xml: &str) -> m1_workspace::Encoding {
     m1_workspace::Encoding::Windows1252
 }
 
-/// Produce a JSON string literal (with double-quote escaping).
+/// Produce a JSON string literal. Escapes everything RFC 8259 §7 requires:
+/// quote, backslash, and all control characters U+0000–U+001F (#50) — a raw
+/// newline in a component comment previously produced invalid JSON.
 fn json_string(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Produce a JSON string literal or `null` for an absent optional.
@@ -795,6 +873,23 @@ fn json_string_or_null(s: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_string_escapes_everything_rfc8259_requires() {
+        // #50: quote, backslash, and ALL of U+0000-U+001F.
+        assert_eq!(json_string("plain"), "\"plain\"");
+        assert_eq!(json_string("a\"b"), "\"a\\\"b\"");
+        assert_eq!(json_string("a\\b"), "\"a\\\\b\"");
+        assert_eq!(json_string("a\nb"), "\"a\\nb\"");
+        assert_eq!(json_string("a\rb"), "\"a\\rb\"");
+        assert_eq!(json_string("a\tb"), "\"a\\tb\"");
+        assert_eq!(json_string("a\u{8}b"), "\"a\\bb\"");
+        assert_eq!(json_string("a\u{c}b"), "\"a\\fb\"");
+        assert_eq!(json_string("a\u{1}b"), "\"a\\u0001b\"");
+        assert_eq!(json_string("a\u{1f}b"), "\"a\\u001fb\"");
+        // Non-control unicode passes through unescaped.
+        assert_eq!(json_string("°C"), "\"°C\"");
+    }
 
     #[test]
     fn motec_write_encoding_defaults_to_1252_not_sniffed_utf8() {

@@ -494,3 +494,155 @@ fn serde_json_sanity(s: &str) {
     assert!(t.starts_with('[') && t.ends_with(']'), "array shape: {t}");
     assert!(!t.contains(",\n]"), "no trailing comma: {t}");
 }
+
+#[test]
+fn dry_run_prints_diff_and_stdout_prints_xml() {
+    // #51: --dry-run is a preview (unified diff, file untouched); --stdout is
+    // output routing (raw XML, file untouched).
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("dryrun_vs_stdout.m1prj");
+    std::fs::write(&path, minimal_project()).unwrap();
+
+    let args = [
+        "create-channel",
+        "--name",
+        "Root.Engine.Temp",
+        "--type",
+        "f32",
+        "--project",
+    ];
+    let dry = Command::new(bin)
+        .args(args)
+        .arg(&path)
+        .arg("--dry-run")
+        .output()
+        .unwrap();
+    assert!(dry.status.success());
+    let dry_out = String::from_utf8_lossy(&dry.stdout);
+    assert!(
+        dry_out.contains("+") && dry_out.contains("Root.Engine.Temp") && dry_out.contains("@@"),
+        "--dry-run must print a unified diff, got: {dry_out}"
+    );
+    assert!(
+        !dry_out.trim_start().starts_with("<?xml"),
+        "--dry-run must not dump raw XML"
+    );
+
+    let raw = Command::new(bin)
+        .args(args)
+        .arg(&path)
+        .arg("--stdout")
+        .output()
+        .unwrap();
+    assert!(raw.status.success());
+    let raw_out = String::from_utf8_lossy(&raw.stdout);
+    assert!(
+        raw_out.trim_start().starts_with("<?xml"),
+        "--stdout must print the raw XML result, got: {raw_out}"
+    );
+
+    // Neither touched the file.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), minimal_project());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn json_escapes_control_characters() {
+    // #50: a multiline comment (CDATA preserves newlines) must come out of
+    // `list-components --json` as an `\n` escape, not a raw control char
+    // inside the string literal — which strict JSON parsers reject.
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("json_escape.m1prj");
+    std::fs::write(&path, minimal_project()).unwrap();
+
+    let set = Command::new(bin)
+        .args([
+            "set-comment",
+            "--component",
+            "Root.Engine.Speed",
+            "--comment",
+            "line one\nline two",
+            "--project",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        set.status.success(),
+        "set-comment failed: {}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+
+    let out = Command::new(bin)
+        .args(["list-components", "--json", "--project"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("line one\\nline two"),
+        "newline must be escaped as \\n inside the JSON string, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("line one\nline two"),
+        "no raw newline may appear inside a JSON string literal"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn rename_rolls_back_files_when_a_rename_fails() {
+    // #49: file renames happen before the XML write; a mid-loop failure rolls
+    // back completed renames and leaves the project XML untouched.
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let dir = tmp_path("rename_tx");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+    let path = dir.join("Project.m1prj");
+    // Two script components under the group being renamed.
+    let xml = minimal_project().replace(
+        "<Component Classname=\"BuiltIn.MethodUser\" Name=\"Root.Engine.Update\"/>",
+        "<Component Classname=\"BuiltIn.MethodUser\" Name=\"Root.Engine.Update\"/>\n    \
+         <Component Classname=\"BuiltIn.MethodUser\" Name=\"Root.Engine.Apply\"/>",
+    );
+    std::fs::write(&path, &xml).unwrap();
+    std::fs::write(dir.join("Scripts/Engine.Update.m1scr"), "/* a */\n").unwrap();
+    std::fs::write(dir.join("Scripts/Engine.Apply.m1scr"), "/* b */\n").unwrap();
+    // Make the SECOND rename fail: its destination exists as a non-empty
+    // directory, which fs::rename cannot replace.
+    std::fs::create_dir_all(dir.join("Scripts/Motor.Apply.m1scr/block")).unwrap();
+
+    let out = Command::new(bin)
+        .args([
+            "rename-component",
+            "--name",
+            "Root.Engine",
+            "--new-name",
+            "Motor",
+            "--project",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "rename must fail when a file rename fails: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // XML untouched, first rename rolled back.
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        xml,
+        "XML must be untouched"
+    );
+    assert!(
+        dir.join("Scripts/Engine.Update.m1scr").exists(),
+        "completed rename must be rolled back"
+    );
+    assert!(
+        !dir.join("Scripts/Motor.Update.m1scr").exists(),
+        "no renamed file may remain"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
