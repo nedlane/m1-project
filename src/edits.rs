@@ -1164,13 +1164,38 @@ pub(crate) fn validate_security(s: &str) -> Result<(), EditError> {
 }
 
 pub(crate) fn validate_type(t: &str) -> Result<(), EditError> {
-    if STORAGE_TYPES.contains(&t) || t.starts_with("::") || t.contains('.') {
-        // Primitives, or an enum reference (`::This.Foo`, `MoTeC Types.Bar`).
-        Ok(())
-    } else {
-        Err(EditError::Invalid(format!(
-            "unknown type `{t}`; valid primitives: {}",
-            STORAGE_TYPES.join(", ")
-        )))
+    // Primitive storage type — always valid.
+    if STORAGE_TYPES.contains(&t) {
+        return Ok(());
     }
+    // Enum reference with `::` prefix: `::Namespace.Member`.
+    // Require at least one non-empty segment before the dot and one after.
+    if let Some(after_colons) = t.strip_prefix("::") {
+        if let Some(dot) = after_colons.find('.') {
+            let (ns, member) = after_colons.split_at(dot);
+            let member = &member[1..]; // skip the '.'
+            if !ns.is_empty() && !member.is_empty() {
+                return Ok(());
+            }
+        }
+        return Err(EditError::Invalid(format!(
+            "malformed enum-ref type `{t}`; expected `::Namespace.Member`"
+        )));
+    }
+    // Dotted qualified name: `Namespace.Member` (e.g. `MoTeC Types.Bar`).
+    // Require non-empty segments on both sides of the first dot.
+    if let Some(dot) = t.find('.') {
+        let (before, after) = t.split_at(dot);
+        let after = &after[1..]; // skip the '.'
+        if !before.is_empty() && !after.is_empty() {
+            return Ok(());
+        }
+        return Err(EditError::Invalid(format!(
+            "malformed enum-ref type `{t}`; expected `Namespace.Member`"
+        )));
+    }
+    Err(EditError::Invalid(format!(
+        "unknown type `{t}`; valid primitives: {}",
+        STORAGE_TYPES.join(", ")
+    )))
 }
