@@ -244,6 +244,24 @@ mod tests {
     }
 
     #[test]
+    fn set_unit_rejects_empty_string() {
+        assert!(
+            matches!(
+                set_unit(PRJ, "Root.Engine.Speed", ""),
+                Err(EditError::Invalid(_))
+            ),
+            "empty unit must return EditError::Invalid"
+        );
+        assert!(
+            matches!(
+                set_unit(PRJ, "Root.Engine.Speed", "   "),
+                Err(EditError::Invalid(_))
+            ),
+            "whitespace-only unit must return EditError::Invalid"
+        );
+    }
+
+    #[test]
     fn set_call_rate_builds_relative_trigger() {
         // Root.Engine.Update -> 2 dots -> "Parent.Parent.Events.On 100Hz".
         let out = set_call_rate(PRJ, "Root.Engine.Update", "100").unwrap();
