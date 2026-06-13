@@ -279,6 +279,33 @@ mod tests {
     }
 
     #[test]
+    fn set_call_rate_rejects_func_user_param() {
+        // BuiltIn.FuncUserParam is a parametric (called) function — it has no
+        // SelectedTrigger slot and must not be schedulable.  The guard must
+        // distinguish "FuncUserParam" from "FuncUser" rather than relying on a
+        // substring match that lets FuncUserParam pass.
+        let prj = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession><Project Name="T"><ComponentStream><List>
+<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.FuncUserParam" Filename="Calc.m1scr" Name="Root.Calc"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.Events"/>
+<Component Classname="BuiltIn.EventKernel" Name="Root.Events.On 100Hz"/>
+</List></ComponentStream></Project></MoTeCM1BuildSession>"#;
+        let result = set_call_rate(prj, "Root.Calc", "100");
+        assert!(
+            matches!(result, Err(EditError::Invalid(_))),
+            "FuncUserParam must be rejected by set_call_rate, got: {result:?}"
+        );
+        // The error message must distinguish parametric from scheduled functions.
+        if let Err(EditError::Invalid(msg)) = result {
+            assert!(
+                msg.contains("parametric") || msg.contains("FuncUserParam"),
+                "error should mention parametric or FuncUserParam, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
     fn available_rates_lists_clocks() {
         let rates = available_rates(PRJ).unwrap();
         assert!(rates.contains(&"100Hz".to_string()));

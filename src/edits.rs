@@ -855,7 +855,18 @@ fn set_default_attr(
 /// exist in the project.
 pub fn set_call_rate(xml: &str, script: &str, rate: &str) -> Result<String, EditError> {
     let loc = locate(xml, script)?;
-    if !loc.classname.contains("FuncUser") && !loc.classname.contains("MethodUser") {
+    // BuiltIn.FuncUserParam is a parametric (called) function — it has no
+    // SelectedTrigger slot and must never be scheduled.  Use suffix matching so
+    // that "FuncUserParam" does not pass through as a "FuncUser" substring hit.
+    if loc.classname.contains("FuncUserParam") {
+        return Err(EditError::Invalid(format!(
+            "`{script}` is a parametric function ({}) — FuncUserParam components \
+             are called with arguments, not scheduled on a clock; \
+             use a FuncUser or MethodUser instead",
+            loc.classname
+        )));
+    }
+    if !loc.classname.ends_with("FuncUser") && !loc.classname.contains("MethodUser") {
         return Err(EditError::Invalid(format!(
             "`{script}` is a {} — only FuncUser/MethodUser scripts have a call rate",
             loc.classname
