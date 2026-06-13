@@ -826,7 +826,15 @@ fn write_or_print(
 /// as UTF-8, and a newly-inserted non-ASCII unit would then be written as UTF-8
 /// that a 1252 reader mojibakes (#12).
 fn motec_write_encoding(xml: &str) -> m1_workspace::Encoding {
-    let head = &xml[..xml.len().min(256)];
+    // Snap the 256-byte head window down to a char boundary: a naive
+    // `&xml[..256]` panics when a multi-byte UTF-8 char straddles offset 256
+    // (#54). `floor_char_boundary` is still unstable, so walk down to the
+    // nearest boundary at or below the cap.
+    let mut end = xml.len().min(256);
+    while end > 0 && !xml.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = &xml[..end];
     if let Some(end) = head.find("?>") {
         let decl = head[..end].to_ascii_lowercase();
         if decl.contains("encoding=\"utf-8\"") || decl.contains("encoding='utf-8'") {
@@ -909,6 +917,28 @@ mod tests {
         assert_eq!(
             motec_write_encoding("<?xml version='1.0' encoding='utf-8'?>"),
             m1_workspace::Encoding::Utf8
+        );
+    }
+
+    #[test]
+    fn motec_write_encoding_no_panic_on_multibyte_char_across_byte_256() {
+        // #54: the 256-byte head window must be snapped to a char boundary.
+        // Build an XML doc with no `?>` in the first 256 bytes and a 2-byte
+        // UTF-8 char (`°`, 0xC2 0xB0) straddling byte offset 256 — a naive
+        // `&xml[..256]` slice panics on the non-boundary index.
+        let mut xml = String::from("<?xml version=\"1.0\"?>");
+        // Pad so that the next char's first byte lands at offset 255, leaving
+        // its second byte at offset 256 (the slice boundary falls mid-char).
+        while xml.len() < 255 {
+            xml.push('a');
+        }
+        assert_eq!(xml.len(), 255);
+        xml.push('°'); // bytes 255..257 — boundary 256 is inside this char
+        assert!(!xml.is_char_boundary(256));
+        // Must not panic; this doc has no utf-8 declaration → Windows-1252.
+        assert_eq!(
+            motec_write_encoding(&xml),
+            m1_workspace::Encoding::Windows1252
         );
     }
 
