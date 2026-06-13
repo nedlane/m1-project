@@ -646,3 +646,44 @@ fn rename_rolls_back_files_when_a_rename_fails() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn create_parameter_cli_smoke() {
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("create_parameter.m1prj");
+    std::fs::write(&path, minimal_project()).unwrap();
+
+    let out = Command::new(bin)
+        .args([
+            "create-parameter",
+            "--name",
+            "Root.Engine.Gain",
+            "--type",
+            "f32",
+            "--unit",
+            "ratio",
+            "--security",
+            "Tune",
+            "--project",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "create-parameter failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        written.contains(r#"Name="Root.Engine.Gain""#),
+        "parameter not found in written file"
+    );
+    assert!(
+        written.contains("BuiltIn.Parameter"),
+        "classname BuiltIn.Parameter not found"
+    );
+    roxmltree::Document::parse(&written).expect("written file must be valid XML");
+
+    let _ = std::fs::remove_file(&path);
+}
