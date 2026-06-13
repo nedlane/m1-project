@@ -95,7 +95,7 @@ pub use query::{
 pub use validate::{Finding, FindingLevel, validate};
 
 #[cfg(test)]
-pub(crate) use edits::{build_trigger, format_motec_float};
+pub(crate) use edits::{build_trigger, format_motec_float, validate_type};
 
 #[cfg(test)]
 mod tests {
@@ -1294,6 +1294,75 @@ mod tests {
             validate(&wired).unwrap().is_empty(),
             "renamed+wired scheduled function should validate clean: {:?}",
             validate(&wired).unwrap()
+        );
+    }
+
+    // ---- validate_type: malformed enum-ref rejection (#58) ------------------
+
+    #[test]
+    fn validate_type_rejects_bare_double_colon() {
+        assert!(
+            matches!(validate_type("::"), Err(EditError::Invalid(_))),
+            "\"::\" must be rejected as a malformed enum ref"
+        );
+    }
+
+    #[test]
+    fn validate_type_rejects_bare_dot() {
+        assert!(
+            matches!(validate_type("."), Err(EditError::Invalid(_))),
+            "\".\" must be rejected as a malformed enum ref"
+        );
+    }
+
+    #[test]
+    fn validate_type_rejects_triple_dot() {
+        assert!(
+            matches!(validate_type("..."), Err(EditError::Invalid(_))),
+            "\"...\" must be rejected as a malformed enum ref"
+        );
+    }
+
+    #[test]
+    fn validate_type_rejects_triple_colon() {
+        assert!(
+            matches!(validate_type(":::"), Err(EditError::Invalid(_))),
+            "\":::\" must be rejected as a malformed enum ref"
+        );
+    }
+
+    #[test]
+    fn validate_type_accepts_valid_enum_refs() {
+        // `::This.Foo` style: double-colon prefix followed by non-empty Namespace.Member
+        assert!(
+            validate_type("::This.Foo").is_ok(),
+            "\"::This.Foo\" must be accepted"
+        );
+        // `MoTeC Types.Bar` style: dotted qualified name with non-empty segments
+        assert!(
+            validate_type("MoTeC Types.Bar").is_ok(),
+            "\"MoTeC Types.Bar\" must be accepted"
+        );
+    }
+
+    #[test]
+    fn validate_type_accepts_all_primitives() {
+        for &ty in STORAGE_TYPES {
+            assert!(
+                validate_type(ty).is_ok(),
+                "primitive type \"{ty}\" must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn set_type_rejects_bare_double_colon() {
+        assert!(
+            matches!(
+                set_type(PRJ, "Root.Engine.Plain", "::"),
+                Err(EditError::Invalid(_))
+            ),
+            "set_type with \"::\" must return EditError::Invalid"
         );
     }
 }
