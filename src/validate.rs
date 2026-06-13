@@ -261,5 +261,3 @@ fn collect_org_paths(
         out.insert(path);
     }
 }
-
-// ---- list-components --------------------------------------------------------
