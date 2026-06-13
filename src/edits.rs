@@ -754,6 +754,9 @@ pub fn set_type(xml: &str, component: &str, ty: &str) -> Result<String, EditErro
 
 /// Set (or replace) a component's display unit (`<Props><Locale><Default Unit>`).
 pub fn set_unit(xml: &str, component: &str, unit: &str) -> Result<String, EditError> {
+    if unit.trim().is_empty() {
+        return Err(EditError::Invalid("unit must not be empty".into()));
+    }
     set_default_attr(xml, component, "Unit", unit)
 }
 
