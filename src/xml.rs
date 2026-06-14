@@ -51,6 +51,29 @@ pub(crate) fn locate(xml: &str, name: &str) -> Result<Located, EditError> {
     })
 }
 
+/// The security groups (`<SecurityRole Name="…">`) the project declares in its
+/// `<SecurityMgr><SecurityRoles>` block, in document order.
+///
+/// Returns `Ok(None)` when the project has **no** `<SecurityMgr>` element at all —
+/// minimal/hand-written projects and the manual's "Automatic" tag-derived
+/// security mode (where no explicit role list exists). Callers treat that as
+/// "fall back to the standard default groups" rather than rejecting everything.
+/// `Ok(Some(roles))` (possibly empty) means the project declares its roles
+/// explicitly and those are the only groups M1-Build will bind.
+pub(crate) fn declared_security_roles(xml: &str) -> Result<Option<Vec<String>>, EditError> {
+    let doc = parse_xml(xml)?;
+    let Some(mgr) = doc.descendants().find(|n| n.has_tag_name("SecurityMgr")) else {
+        return Ok(None);
+    };
+    let roles = mgr
+        .descendants()
+        .filter(|n| n.has_tag_name("SecurityRole"))
+        .filter_map(|n| n.attribute("Name"))
+        .map(str::to_string)
+        .collect();
+    Ok(Some(roles))
+}
+
 /// True if a component with this exact `Name` exists (only considers real components
 /// that carry a `Classname` attribute, excluding `<Organisation>` view-only nodes).
 pub(crate) fn exists(xml: &str, name: &str) -> Result<bool, EditError> {
