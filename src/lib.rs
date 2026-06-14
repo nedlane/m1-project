@@ -176,6 +176,32 @@ mod tests {
     }
 
     #[test]
+    fn create_channel_rejects_empty_unit() {
+        // An empty/whitespace unit would write `<Default Unit=""/>` — invalid;
+        // mirror set_unit, which already rejects it.
+        assert!(matches!(
+            create_channel(PRJ, "Root.Engine.X", Some("f32"), Some(""), None),
+            Err(EditError::Invalid(_))
+        ));
+        assert!(matches!(
+            create_channel(PRJ, "Root.Engine.X", Some("f32"), Some("   "), None),
+            Err(EditError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn create_parameter_rejects_empty_unit() {
+        assert!(matches!(
+            create_parameter(PRJ, "Root.Engine.X", Some("f32"), Some(""), None),
+            Err(EditError::Invalid(_))
+        ));
+        assert!(matches!(
+            create_parameter(PRJ, "Root.Engine.X", Some("f32"), Some("\t"), None),
+            Err(EditError::Invalid(_))
+        ));
+    }
+
+    #[test]
     fn set_security_replaces_existing() {
         let out = set_security(PRJ, "Root.Engine.Speed", "Calibration").unwrap();
         parses(&out);
