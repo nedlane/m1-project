@@ -220,12 +220,12 @@ pub(crate) fn ensure_props(xml: &str, component: &str) -> Result<String, EditErr
     }
     let elem = &xml[loc.range.clone()];
     let indent = indent_at(xml, loc.range.start).to_string();
-    if elem.trim_end().ends_with("/>") {
-        let open = elem
-            .trim_end()
-            .strip_suffix("/>")
-            .expect("checked by ends_with(\"/>\") above");
-        let new = format!("{open}>\n{indent} <Props/>\n{indent}</Component>");
+    if props_self_closing(elem) {
+        let new = reopen_self_closing(
+            elem,
+            &format!("\n{indent} <Props/>"),
+            &format!("\n{indent}</Component>"),
+        );
         Ok(splice(xml, loc.range, &new))
     } else {
         // Has children but no <Props>: insert <Props/> right after the open tag.
@@ -240,6 +240,69 @@ pub(crate) fn ensure_props(xml: &str, component: &str) -> Result<String, EditErr
 
 pub(crate) fn props_self_closing(props_text: &str) -> bool {
     props_text.trim_end().ends_with("/>")
+}
+
+/// Reopen a self-closing element and nest content inside it.
+///
+/// `elem_text` is the source text of an element the caller has already confirmed
+/// is self-closing (`<Tag …/>`, via [`props_self_closing`]). This strips the
+/// trailing `/>`, turns it into an open tag, and appends `child_block` followed
+/// by `close_marker` — e.g. `reopen_self_closing("<Props/>", "\n  <Locale/>",
+/// "\n </Props>")` yields `"<Props>\n  <Locale/>\n </Props>"`.
+///
+/// Both fragments are supplied verbatim by the caller because indentation and the
+/// matching close tag differ per call site; this helper owns only the
+/// `trim_end().strip_suffix("/>")` reopen step that every self-closing splice
+/// repeated. It is the shared half of [`insert_child_into_element`].
+pub(crate) fn reopen_self_closing(
+    elem_text: &str,
+    child_block: &str,
+    close_marker: &str,
+) -> String {
+    let open = elem_text
+        .trim_end()
+        .strip_suffix("/>")
+        .expect("caller must check props_self_closing first");
+    format!("{open}>{child_block}{close_marker}")
+}
+
+/// Rewrite a whole element's text to nest one extra child just inside it,
+/// returning the new element text (the caller splices it back over the original
+/// range). Handles both shapes:
+///
+/// - **self-closing** (`<Tag …/>`): reopened via [`reopen_self_closing`], then
+///   `child_block` and `\n{indent}{close_tag}` appended.
+/// - **already has children** (`<Tag …> … {close_tag}`): the last `close_tag` is
+///   found, the text before it trimmed of trailing whitespace, and
+///   `child_block` + `\n{indent}{close_tag}` spliced in just before it.
+///
+/// `child_block` must include its own leading newline/indent (the corpus layout
+/// puts every child on its own line). `indent` is the element's own indentation;
+/// the close tag is re-laid at that column. Errors with [`EditError::Invalid`]
+/// if a non-self-closing element is missing its `close_tag` (malformed input).
+///
+/// This is the whole-element-rewrite primitive shared by the `<Props>` /
+/// `<List.UserTags>` insert paths. Splices that need byte-exact offsets into the
+/// *original* document (set_comment / ensure_props / org_insert_child has-children
+/// arms) deliberately do **not** route through here.
+pub(crate) fn insert_child_into_element(
+    elem_text: &str,
+    child_block: &str,
+    indent: &str,
+    close_tag: &str,
+) -> Result<String, EditError> {
+    let close_marker = format!("\n{indent}{close_tag}");
+    if props_self_closing(elem_text) {
+        Ok(reopen_self_closing(elem_text, child_block, &close_marker))
+    } else {
+        let close = elem_text
+            .rfind(close_tag)
+            .ok_or_else(|| EditError::Invalid(format!("malformed {close_tag}")))?;
+        Ok(format!(
+            "{}{child_block}{close_marker}",
+            elem_text[..close].trim_end()
+        ))
+    }
 }
 
 /// The byte range (in `xml`) of the value of `attr` on the target component's
@@ -376,13 +439,13 @@ pub(crate) fn org_insert_child(
     let child_indent = format!("{parent_indent} ");
     let child = format!("\n{child_indent}<Component Name=\"{}\"/>", xml_escape(leaf));
 
-    if parent_text.trim_end().ends_with("/>") {
+    if props_self_closing(parent_text) {
         // Childless `<Component Name="X"/>` -> open it and nest the new child.
-        let open = parent_text
-            .trim_end()
-            .strip_suffix("/>")
-            .expect("checked by ends_with(\"/>\") above");
-        let new = format!("{open}>{child}\n{parent_indent}</Component>");
+        let new = reopen_self_closing(
+            parent_text,
+            &child,
+            &format!("\n{parent_indent}</Component>"),
+        );
         Ok(Some(splice(xml, parent_range, &new)))
     } else {
         // Has children: splice the new child in just before the parent's own
@@ -492,5 +555,52 @@ mod tests {
             .find(|n| n.has_tag_name("Props"))
             .expect("fixture has a Props element");
         assert!(!is_real_component(&props));
+    }
+
+    #[test]
+    fn reopen_self_closing_strips_slash_and_nests_block() {
+        assert_eq!(
+            reopen_self_closing("<Props/>", "\n  <Locale/>", "\n </Props>"),
+            "<Props>\n  <Locale/>\n </Props>"
+        );
+        // Trailing whitespace after `/>` is tolerated (matches the corpus, where
+        // the element text can carry a trailing newline before the next sibling).
+        assert_eq!(
+            reopen_self_closing("<Props Type=\"f32\"/>\n", "\n  X", "\n</Props>"),
+            "<Props Type=\"f32\">\n  X\n</Props>"
+        );
+    }
+
+    #[test]
+    fn insert_child_into_element_reopens_self_closing() {
+        // Self-closing <Props/> at one space of indent, nesting a <List.UserTags>
+        // block one space deeper — the shape add_tag/set_default_attr produce.
+        let block = "\n  <List.UserTags>\n   <Entry Value=\"V\"/>\n  </List.UserTags>";
+        let got = insert_child_into_element("<Props/>", block, " ", "</Props>").unwrap();
+        assert_eq!(
+            got,
+            "<Props>\n  <List.UserTags>\n   <Entry Value=\"V\"/>\n  </List.UserTags>\n </Props>"
+        );
+    }
+
+    #[test]
+    fn insert_child_into_element_splices_before_close_when_has_children() {
+        // Element already has children: the new block lands just before the last
+        // close tag, trailing whitespace before that close tag trimmed away.
+        let elem = "<Props Type=\"f32\">\n  <Locale/>\n </Props>";
+        let block = "\n  <List.UserTags>\n   <Entry Value=\"V\"/>\n  </List.UserTags>";
+        let got = insert_child_into_element(elem, block, " ", "</Props>").unwrap();
+        assert_eq!(
+            got,
+            "<Props Type=\"f32\">\n  <Locale/>\
+             \n  <List.UserTags>\n   <Entry Value=\"V\"/>\n  </List.UserTags>\n </Props>"
+        );
+    }
+
+    #[test]
+    fn insert_child_into_element_rejects_missing_close_tag() {
+        // Not self-closing and no close tag present -> malformed.
+        let err = insert_child_into_element("<Props Type=\"f32\">", "\n X", "", "</Props>");
+        assert!(matches!(err, Err(EditError::Invalid(_))));
     }
 }
