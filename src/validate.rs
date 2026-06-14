@@ -89,12 +89,15 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
             org_roots.push(n);
             continue;
         }
-        if !n.has_tag_name("Component") {
+        // Only real components (carrying a Classname) participate — the
+        // <Organisation> view nodes are excluded by the same single-source
+        // predicate every other pass uses.
+        if !is_real_component(&n) {
             continue;
         }
-        let Some(classname) = n.attribute("Classname") else {
-            continue;
-        };
+        let classname = n
+            .attribute("Classname")
+            .expect("is_real_component checked Classname");
         let Some(nm) = n.attribute("Name") else {
             continue;
         };

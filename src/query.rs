@@ -33,16 +33,15 @@ pub struct ComponentEntry {
 
 /// Enumerate all `<Component>` elements in document order.
 ///
-/// Only real components (those with a `Classname` attribute) are returned.
-/// The `<Organisation>` section of a real `.m1prj` also contains `<Component>` nodes
-/// without `Classname` — those are view-only structural nodes and are excluded.
+/// Only real components (those with a `Classname` attribute) are returned — the
+/// shared `is_real_component` predicate is the single source of truth for that
+/// distinction. The `<Organisation>` section of a real `.m1prj` also contains
+/// `<Component>` nodes without `Classname`; those are view-only structural nodes
+/// and are excluded.
 pub fn list_components(xml: &str) -> Result<Vec<ComponentEntry>, EditError> {
     let doc = parse_xml(xml)?;
     let mut out = Vec::new();
-    for n in doc
-        .descendants()
-        .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
-    {
+    for n in doc.descendants().filter(is_real_component) {
         let Some(path) = n.attribute("Name") else {
             continue;
         };
@@ -122,10 +121,7 @@ pub struct ScriptComponent {
 pub fn script_components(xml: &str) -> Result<Vec<ScriptComponent>, EditError> {
     let doc = parse_xml(xml)?;
     let mut out = Vec::new();
-    for n in doc
-        .descendants()
-        .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
-    {
+    for n in doc.descendants().filter(is_real_component) {
         let Some(path) = n.attribute("Name") else {
             continue;
         };
@@ -179,7 +175,7 @@ pub fn available_rates(xml: &str) -> Result<Vec<String>, EditError> {
     let doc = parse_xml(xml)?;
     let mut out: Vec<String> = doc
         .descendants()
-        .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
+        .filter(is_real_component)
         .filter(|n| n.attribute("Classname") == Some("BuiltIn.EventKernel"))
         .filter_map(|n| n.attribute("Name"))
         .filter_map(|nm| nm.strip_prefix("Root.Events.On ").map(str::to_string))

@@ -44,10 +44,7 @@ fn insert_component(
     let mut anchor_for_indent = parent_loc.range.start;
     {
         let doc = parse_xml(xml)?;
-        for n in doc
-            .descendants()
-            .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
-        {
+        for n in doc.descendants().filter(is_real_component) {
             // Anchor on the last *direct* child of `parent` — one whose Name is
             // exactly one segment deeper. `starts_with(&prefix)` alone also
             // matches a grandchild like `Root.Engine.Sub.Deep`, which would drop
@@ -333,15 +330,12 @@ pub fn delete_component(
 
     // Direct children: names that are exactly one segment deeper.
     let prefix = format!("{name}.");
-    let has_children = doc
-        .descendants()
-        .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
-        .any(|n| {
-            n.attribute("Name")
-                .and_then(|nm| nm.strip_prefix(&prefix))
-                .map(|rest| !rest.contains('.'))
-                == Some(true)
-        });
+    let has_children = doc.descendants().filter(is_real_component).any(|n| {
+        n.attribute("Name")
+            .and_then(|nm| nm.strip_prefix(&prefix))
+            .map(|rest| !rest.contains('.'))
+            == Some(true)
+    });
 
     if has_children && !recursive {
         return Err(EditError::Invalid(format!(
@@ -368,7 +362,7 @@ pub fn delete_component(
     // `SelectedTrigger` and even that is group-relative pointing at Events).
     let deleted_names: std::collections::HashSet<String> = doc
         .descendants()
-        .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
+        .filter(is_real_component)
         .filter_map(|n| n.attribute("Name"))
         .filter(|nm| *nm == name || nm.starts_with(&prefix))
         .map(str::to_string)
@@ -379,7 +373,7 @@ pub fn delete_component(
         .iter()
         .filter(|nm| {
             doc.descendants()
-                .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
+                .filter(is_real_component)
                 .find(|n| n.attribute("Name") == Some(nm.as_str()))
                 .map(|n| n.attribute("Classname") == Some("BuiltIn.EventKernel"))
                 .unwrap_or(false)
@@ -393,7 +387,7 @@ pub fn delete_component(
     if !deleted_clocks.is_empty() {
         for n in doc
             .descendants()
-            .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
+            .filter(is_real_component)
             .filter(|n| n.attribute("Name").map(|nm| !deleted_names.contains(nm)) == Some(true))
         {
             let Some(owner) = n.attribute("Name") else {
@@ -433,7 +427,7 @@ pub fn delete_component(
     // those intervening siblings, so each element is removed individually.
     let mut ranges_to_remove: Vec<std::ops::Range<usize>> = doc
         .descendants()
-        .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
+        .filter(is_real_component)
         .filter(|n| n.attribute("Name").map(|nm| deleted_names.contains(nm)) == Some(true))
         .map(|n| {
             // Extend the range backwards over the preceding indentation AND its
@@ -512,7 +506,7 @@ pub fn rename_component(
     // Collect every component name that will be renamed (old_name and all descendants).
     let mut to_rename: Vec<(String, String)> = doc
         .descendants()
-        .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
+        .filter(is_real_component)
         .filter_map(|n| n.attribute("Name"))
         .filter(|nm| *nm == old_name || nm.starts_with(&old_prefix))
         .map(|nm| {
@@ -534,7 +528,7 @@ pub fn rename_component(
         .iter()
         .filter(|(old, _)| {
             doc.descendants()
-                .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
+                .filter(is_real_component)
                 .find(|n| n.attribute("Name") == Some(old.as_str()))
                 .map(|n| {
                     n.attribute("Classname")
@@ -568,10 +562,7 @@ pub fn rename_component(
         let doc2 = parse_xml(&result)?;
         // Collect (offset, old_val, new_val) for each Name attr that needs changing.
         let mut renames: Vec<(std::ops::Range<usize>, String)> = Vec::new();
-        for n in doc2
-            .descendants()
-            .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
-        {
+        for n in doc2.descendants().filter(is_real_component) {
             let Some(nm) = n.attribute("Name") else {
                 continue;
             };
@@ -593,10 +584,7 @@ pub fn rename_component(
     {
         let doc3 = parse_xml(&result)?;
         let mut trigger_fixes: Vec<(std::ops::Range<usize>, String)> = Vec::new();
-        for n in doc3
-            .descendants()
-            .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
-        {
+        for n in doc3.descendants().filter(is_real_component) {
             // After pass 1, the owner's Name is already the NEW name.
             let Some(owner_new) = n.attribute("Name") else {
                 continue;
@@ -644,10 +632,7 @@ pub fn rename_component(
     {
         let doc = parse_xml(&result)?;
         let mut fixes: Vec<(std::ops::Range<usize>, String)> = Vec::new();
-        for n in doc
-            .descendants()
-            .filter(|n| n.has_tag_name("Component") && n.has_attribute("Classname"))
-        {
+        for n in doc.descendants().filter(is_real_component) {
             let Some(owner_new) = n.attribute("Name") else {
                 continue;
             };

@@ -11,6 +11,19 @@ pub(crate) fn parse_xml(xml: &str) -> Result<roxmltree::Document<'_>, EditError>
     roxmltree::Document::parse(xml).map_err(|e| EditError::Xml(e.to_string()))
 }
 
+/// True if `n` is a **real** `<Component>` — one that carries a `Classname`
+/// attribute, i.e. an entry in a `<ComponentStream>`'s flat `<List>`.
+///
+/// The `<Organisation>` view tree also nests `<Component>` elements, but those
+/// are short-name, view-only structural nodes with **no** `Classname`; they must
+/// be excluded from every structural query/edit/validation pass. This single
+/// definition is the source of truth for that distinction — see the
+/// `<Organisation>` navigation note further down this file for why the two
+/// representations coexist.
+pub(crate) fn is_real_component(n: &roxmltree::Node) -> bool {
+    n.has_tag_name("Component") && n.has_attribute("Classname")
+}
+
 /// Find the `<Component>` whose `Name` is `component` in an already-parsed `doc`,
 /// erroring with [`EditError::NoSuchComponent`] if absent. The caller owns `doc`
 /// so the returned `Node` (which borrows it) stays valid — see the LIFETIME NOTE
@@ -20,11 +33,7 @@ pub(crate) fn parse_and_find<'a, 'd>(
     component: &str,
 ) -> Result<roxmltree::Node<'d, 'a>, EditError> {
     doc.descendants()
-        .find(|n| {
-            n.has_tag_name("Component")
-                && n.has_attribute("Classname")
-                && n.attribute("Name") == Some(component)
-        })
+        .find(|n| is_real_component(n) && n.attribute("Name") == Some(component))
         .ok_or_else(|| EditError::NoSuchComponent(component.to_string()))
 }
 
@@ -78,11 +87,9 @@ pub(crate) fn declared_security_roles(xml: &str) -> Result<Option<Vec<String>>, 
 /// that carry a `Classname` attribute, excluding `<Organisation>` view-only nodes).
 pub(crate) fn exists(xml: &str, name: &str) -> Result<bool, EditError> {
     let doc = parse_xml(xml)?;
-    Ok(doc.descendants().any(|n| {
-        n.has_tag_name("Component")
-            && n.has_attribute("Classname")
-            && n.attribute("Name") == Some(name)
-    }))
+    Ok(doc
+        .descendants()
+        .any(|n| is_real_component(&n) && n.attribute("Name") == Some(name)))
 }
 
 /// The leading whitespace (indentation) of the line containing byte `pos`.
@@ -423,4 +430,67 @@ pub(crate) fn xml_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PRJ: &str = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession>
+ <Project Name="T">
+  <ComponentStream>
+   <List>
+    <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+    <Component Classname="BuiltIn.Channel" Name="Root.Speed"><Props Type="f32"/></Component>
+   </List>
+   <Organisation>
+    <Component Name="Root">
+     <Component Name="Speed"/>
+    </Component>
+   </Organisation>
+  </ComponentStream>
+ </Project>
+</MoTeCM1BuildSession>
+"#;
+
+    #[test]
+    fn is_real_component_accepts_classname_carrying_list_nodes() {
+        let doc = parse_xml(PRJ).expect("valid xml");
+        // The flat <List> nodes carry a Classname — they are the real components.
+        let real: Vec<&str> = doc
+            .descendants()
+            .filter(is_real_component)
+            .filter_map(|n| n.attribute("Name"))
+            .collect();
+        assert_eq!(real, vec!["Root", "Root.Speed"]);
+    }
+
+    #[test]
+    fn is_real_component_rejects_organisation_view_nodes() {
+        let doc = parse_xml(PRJ).expect("valid xml");
+        // Every <Organisation> <Component> lacks a Classname (view-only structural
+        // node) and must be excluded by the predicate.
+        let org = doc
+            .descendants()
+            .find(|n| n.has_tag_name("Organisation"))
+            .expect("fixture has an Organisation tree");
+        for view_node in org.descendants().filter(|n| n.has_tag_name("Component")) {
+            assert!(
+                !is_real_component(&view_node),
+                "Organisation view node {:?} must not count as a real component",
+                view_node.attribute("Name")
+            );
+        }
+    }
+
+    #[test]
+    fn is_real_component_rejects_non_component_elements() {
+        let doc = parse_xml(PRJ).expect("valid xml");
+        let props = doc
+            .descendants()
+            .find(|n| n.has_tag_name("Props"))
+            .expect("fixture has a Props element");
+        assert!(!is_real_component(&props));
+    }
 }
