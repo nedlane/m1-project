@@ -750,6 +750,62 @@ mod tests {
     }
 
     #[test]
+    fn delete_clock_set_only_contains_event_kernels() {
+        // The reference-guard treats only `BuiltIn.EventKernel` components as
+        // clocks.  Deleting a NON-kernel component whose absolute path happens to
+        // be the target of a surviving SelectedTrigger must NOT be blocked: a
+        // non-kernel is not a clock, so no script can legitimately be triggered by
+        // it.  This pins the Classname discrimination that classifies the deleted
+        // set (regression guard for the single-pass clock-set construction).
+        let prj = r#"<?xml version="1.0" encoding="utf-8"?>
+<MoTeCM1BuildSession>
+ <Project Name="T">
+  <ComponentStream>
+   <List>
+    <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+    <Component Classname="BuiltIn.GroupCompound" Name="Root.Engine"/>
+    <Component Classname="BuiltIn.MethodUser" Name="Root.Engine.Update">
+     <Props SelectedTrigger="Parent.Parent.Decoy.NotAClock"/>
+    </Component>
+    <Component Classname="BuiltIn.GroupCompound" Name="Root.Decoy"/>
+    <Component Classname="BuiltIn.Channel" Name="Root.Decoy.NotAClock"/>
+   </List>
+  </ComponentStream>
+ </Project>
+</MoTeCM1BuildSession>
+"#;
+        // Root.Decoy.NotAClock is a Channel (not an EventKernel), so deleting the
+        // Root.Decoy subtree must succeed even though Update points its
+        // SelectedTrigger at NotAClock — the guard never sees a deleted *clock*.
+        let out = delete_component(prj, "Root.Decoy", true, false).unwrap();
+        parses(&out);
+        assert!(!out.contains("Root.Decoy"), "subtree must be gone");
+        assert!(
+            out.contains(r#"Name="Root.Engine.Update""#),
+            "the referencing component is untouched"
+        );
+    }
+
+    #[test]
+    fn delete_referenced_event_kernel_leaf_is_blocked() {
+        // The positive counterpart: deleting an EventKernel leaf that a surviving
+        // SelectedTrigger resolves to must be refused without --force.  Together
+        // with the test above this pins exactly which deleted names land in the
+        // clock set.
+        let prj_with_triggers = create_prj_with_triggers();
+        let err =
+            delete_component(&prj_with_triggers, "Root.Events.On 100Hz", false, false).unwrap_err();
+        assert!(
+            matches!(err, EditError::Invalid(_)),
+            "expected Invalid, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("SelectedTrigger"),
+            "error should mention SelectedTrigger"
+        );
+    }
+
+    #[test]
     fn delete_preserves_surrounding_whitespace_tidiness() {
         // After deletion the file should still parse and should not have a blank line
         // where the component was (the whole line, break included, is consumed).
