@@ -131,7 +131,7 @@ pub fn create_channel(
         validate_type(t)?;
     }
     if let Some(s) = security {
-        validate_security(s)?;
+        validate_security(xml, s)?;
     }
     validate_unit(unit)?;
     insert_component(xml, name, "BuiltIn.Channel", "", |indent| {
@@ -152,7 +152,7 @@ pub fn create_parameter(
         validate_type(t)?;
     }
     if let Some(s) = security {
-        validate_security(s)?;
+        validate_security(xml, s)?;
     }
     validate_unit(unit)?;
     insert_component(xml, name, "BuiltIn.Parameter", "", |indent| {
@@ -210,7 +210,7 @@ pub fn create_table(
         )));
     }
     if let Some(s) = security {
-        validate_security(s)?;
+        validate_security(xml, s)?;
     }
 
     // Resolve each axis source: absolute paths must exist and become
@@ -729,7 +729,7 @@ pub(crate) fn validate_name_segment(name: &str) -> Result<(), EditError> {
 
 /// Set (or replace) a component's `<Props Security="…">`.
 pub fn set_security(xml: &str, component: &str, security: &str) -> Result<String, EditError> {
-    validate_security(security)?;
+    validate_security(xml, security)?;
     set_props_attr(xml, component, "Security", security)
 }
 
@@ -1165,14 +1165,24 @@ pub(crate) fn validate_unit(unit: Option<&str>) -> Result<(), EditError> {
     Ok(())
 }
 
-pub(crate) fn validate_security(s: &str) -> Result<(), EditError> {
-    if SECURITY_LEVELS.contains(&s) {
-        Ok(())
-    } else {
-        Err(EditError::Invalid(format!(
+/// Validate a `Security` value against the project's **declared** security groups
+/// (`<SecurityMgr><SecurityRoles>`), since those are project-defined and may
+/// include custom groups beyond the four standard ones (the real AV-M1 project
+/// declares a `PDM` group, for instance). Only when the project has no
+/// `<SecurityMgr>` element — minimal/test projects and the manual's "Automatic"
+/// tag-derived security mode — do we fall back to [`SECURITY_LEVELS`].
+pub(crate) fn validate_security(xml: &str, s: &str) -> Result<(), EditError> {
+    match declared_security_roles(xml)? {
+        Some(roles) if roles.iter().any(|r| r == s) => Ok(()),
+        Some(roles) => Err(EditError::Invalid(format!(
+            "unknown security group `{s}`; the project declares: {}",
+            roles.join(", ")
+        ))),
+        None if SECURITY_LEVELS.contains(&s) => Ok(()),
+        None => Err(EditError::Invalid(format!(
             "unknown security level `{s}`; valid: {}",
             SECURITY_LEVELS.join(", ")
-        )))
+        ))),
     }
 }
 

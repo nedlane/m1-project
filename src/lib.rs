@@ -30,8 +30,13 @@
 
 use std::fmt;
 
-/// The MoTeC security / access levels, in increasing order of restriction. These
-/// are the only values M1-Build accepts for `<Props Security="…">`.
+/// The standard MoTeC security / access groups, in increasing order of
+/// restriction. Security groups are **project-defined** — declared inline in the
+/// project's `<SecurityMgr><SecurityRoles>` (M1-Build supports up to 64, and the
+/// real AV-M1 project adds a custom `PDM` group). These four are only the
+/// documented default fallback used when a project declares no `<SecurityMgr>`
+/// (minimal/test projects and the "Automatic" tag-derived security mode); a real
+/// project may declare additional groups in `<SecurityRoles>`.
 pub const SECURITY_LEVELS: &[&str] = &["Tune", "Calibration", "Master Calibration", "Resource"];
 
 /// Storage types a channel/parameter may declare (`<Props Type="…">`). Mirrors the
@@ -218,6 +223,134 @@ mod tests {
         parses(&out);
         assert!(out.contains(r#"Name="Root.Engine.Plain""#));
         assert!(out.contains(r#"Security="Resource""#));
+    }
+
+    /// A project that declares its security groups inline, including a custom
+    /// `PDM` group beyond the four standard ones — mirrors the real AV-M1 project.
+    const PRJ_WITH_ROLES: &str = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession>
+ <Project Name="T">
+  <SecurityMgr>
+   <SecurityRoles>
+    <SecurityRole Name="Resource"/>
+    <SecurityRole Name="Master Calibration"/>
+    <SecurityRole Name="Calibration"/>
+    <SecurityRole Name="Tune"/>
+    <SecurityRole Name="PDM"/>
+   </SecurityRoles>
+  </SecurityMgr>
+  <ComponentStream>
+   <List>
+    <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+    <Component Classname="BuiltIn.Channel" Name="Root.Sig">
+     <Props Type="f32" Security="Tune"/>
+    </Component>
+   </List>
+  </ComponentStream>
+ </Project>
+</MoTeCM1BuildSession>
+"#;
+
+    #[test]
+    fn set_security_accepts_project_declared_custom_group() {
+        // `PDM` is not in SECURITY_LEVELS, but the project declares it — it must
+        // be accepted (the static 4-name list wrongly rejected it).
+        let out = set_security(PRJ_WITH_ROLES, "Root.Sig", "PDM").unwrap();
+        parses(&out);
+        assert!(out.contains(r#"Security="PDM""#));
+    }
+
+    #[test]
+    fn set_security_rejects_value_not_in_declared_roles() {
+        // A project that declares only `Tune` must reject any other value, even
+        // a standard one like `Calibration`, because M1-Build would not bind it.
+        let prj = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession><Project Name="T">
+<SecurityMgr><SecurityRoles><SecurityRole Name="Tune"/></SecurityRoles></SecurityMgr>
+<ComponentStream><List>
+<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.Channel" Name="Root.Sig"><Props Type="f32"/></Component>
+</List></ComponentStream></Project></MoTeCM1BuildSession>"#;
+        let err = set_security(prj, "Root.Sig", "Calibration").unwrap_err();
+        assert!(
+            matches!(&err, EditError::Invalid(m) if m.contains("Calibration") && m.contains("Tune")),
+            "should report the undeclared value and the declared set: {err}"
+        );
+    }
+
+    #[test]
+    fn set_security_falls_back_to_defaults_without_security_mgr() {
+        // PRJ has no <SecurityMgr> — the four standard groups remain valid, and a
+        // bogus one is still rejected (Automatic-mode / minimal-project fallback).
+        let out = set_security(PRJ, "Root.Engine.Plain", "Master Calibration").unwrap();
+        assert!(out.contains(r#"Security="Master Calibration""#));
+        let err = set_security(PRJ, "Root.Engine.Plain", "PDM").unwrap_err();
+        assert!(matches!(err, EditError::Invalid(_)));
+    }
+
+    #[test]
+    fn create_channel_accepts_project_declared_custom_group() {
+        let out = create_channel(
+            PRJ_WITH_ROLES,
+            "Root.NewSig",
+            Some("f32"),
+            None,
+            Some("PDM"),
+        )
+        .unwrap();
+        parses(&out);
+        assert!(out.contains(r#"Security="PDM""#));
+    }
+
+    #[test]
+    fn validate_flags_security_value_not_in_declared_roles() {
+        // A component carrying a Security value the project does not declare must
+        // be flagged (M1-Build cannot bind it). Previously validate() never
+        // cross-checked Security against <SecurityRoles> at all.
+        let prj = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession><Project Name="T">
+<SecurityMgr><SecurityRoles><SecurityRole Name="Tune"/></SecurityRoles></SecurityMgr>
+<ComponentStream><List>
+<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.Channel" Name="Root.Bad"><Props Type="f32" Security="Nonexistent"/></Component>
+</List></ComponentStream></Project></MoTeCM1BuildSession>"#;
+        let findings = validate(prj).unwrap();
+        assert!(
+            findings.iter().any(|f| f.path == "Root.Bad"
+                && f.level == FindingLevel::Error
+                && f.message.contains("Nonexistent")),
+            "undeclared Security value should be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_declared_custom_security_group() {
+        // A component using a declared custom group (`PDM`) must NOT be flagged.
+        let findings = validate(PRJ_WITH_ROLES).unwrap();
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.path == "Root.Sig" && f.message.contains("Security group")),
+            "a declared group must not be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_skips_security_check_without_security_mgr() {
+        // No <SecurityMgr> => Automatic-mode => Check 7 is skipped entirely, so a
+        // non-standard Security value is NOT flagged (avoids false positives).
+        let prj = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession><Project Name="T"><ComponentStream><List>
+<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.Channel" Name="Root.Sig"><Props Type="f32" Security="Anything"/></Component>
+</List></ComponentStream></Project></MoTeCM1BuildSession>"#;
+        let findings = validate(prj).unwrap();
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.message.contains("Security group")),
+            "no <SecurityMgr> => no Check-7 finding: {findings:?}"
+        );
     }
 
     #[test]

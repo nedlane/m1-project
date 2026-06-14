@@ -50,9 +50,19 @@ impl fmt::Display for Finding {
 ///    (mirrors M1-Build's "no event selected" — such a function never runs).
 /// 6. Every value component (`BuiltIn.Channel`/`BuiltIn.Parameter`) has a
 ///    `<Props Security>` (mirrors M1-Build Error 1601 "No security group selected").
+/// 7. Every component's `<Props Security>` value is one of the project's declared
+///    security groups (`<SecurityMgr><SecurityRoles>`). M1-Build will not bind a
+///    component to a group the project does not declare. Skipped entirely for
+///    projects with no `<SecurityMgr>` (Automatic / tag-derived security mode),
+///    where there is no explicit role list to check against.
 pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
     let doc = parse_xml(xml)?;
     let mut findings: Vec<Finding> = Vec::new();
+
+    // The project's declared security groups, if it declares any (Check 7).
+    // `None` => no <SecurityMgr> (Automatic security mode) => skip the check.
+    let declared_roles: Option<std::collections::HashSet<String>> =
+        declared_security_roles(xml)?.map(|roles| roles.into_iter().collect());
 
     // ONE pass over the document fills every accumulator the checks below need;
     // validate() used to make eight separate `descendants()` traversals, and it
@@ -130,6 +140,25 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                 path: nm.to_string(),
                 message: "no security group selected — a channel/parameter needs a Security level"
                     .into(),
+            });
+        }
+
+        // Check 7: a Security value that is not one of the project's declared
+        // groups. Security groups are project-defined (<SecurityMgr>
+        // <SecurityRoles>); M1-Build will not bind a component to a group the
+        // project does not declare, so an undeclared value is an error. Only
+        // checked when the project declares roles explicitly — Automatic-mode
+        // projects (no <SecurityMgr>) have no role list to validate against.
+        if let (Some(roles), Some(sec)) =
+            (&declared_roles, props.and_then(|p| p.attribute("Security")))
+            && !roles.contains(sec)
+        {
+            findings.push(Finding {
+                level: FindingLevel::Error,
+                path: nm.to_string(),
+                message: format!(
+                    "Security group `{sec}` is not declared in the project's <SecurityRoles> — M1-Build cannot bind it"
+                ),
             });
         }
     }
