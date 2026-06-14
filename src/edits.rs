@@ -133,6 +133,7 @@ pub fn create_channel(
     if let Some(s) = security {
         validate_security(s)?;
     }
+    validate_unit(unit)?;
     insert_component(xml, name, "BuiltIn.Channel", "", |indent| {
         value_body(indent, ty, unit, security)
     })
@@ -153,6 +154,7 @@ pub fn create_parameter(
     if let Some(s) = security {
         validate_security(s)?;
     }
+    validate_unit(unit)?;
     insert_component(xml, name, "BuiltIn.Parameter", "", |indent| {
         value_body(indent, ty, unit, security)
     })
@@ -1150,6 +1152,18 @@ pub fn remove_tag(xml: &str, component: &str, tag: &str) -> Result<String, EditE
         range,
         &format!("<List.UserTags>{entries}\n{indent}</List.UserTags>"),
     ))
+}
+
+/// Reject an empty/whitespace-only optional unit before it is written as
+/// `<Default Unit=""/>`. Mirrors [`set_unit`]'s guard so the create verbs and
+/// the setter agree. `None` (no unit element at all) is fine.
+pub(crate) fn validate_unit(unit: Option<&str>) -> Result<(), EditError> {
+    if let Some(u) = unit
+        && u.trim().is_empty()
+    {
+        return Err(EditError::Invalid("unit must not be empty".into()));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_security(s: &str) -> Result<(), EditError> {
