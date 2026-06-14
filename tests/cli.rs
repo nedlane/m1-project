@@ -329,6 +329,85 @@ fn list_components_cli_json() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A `.m1prj` declaring its security groups inline, including a custom `PDM`
+/// group — the shape the real AV-M1 project uses.
+fn project_with_security_roles() -> &'static str {
+    "<?xml version=\"1.0\"?>\n\
+<MoTeCM1BuildSession>\n\
+ <Project Name=\"T\">\n\
+  <SecurityMgr>\n\
+   <SecurityRoles>\n\
+    <SecurityRole Name=\"Tune\"/>\n\
+    <SecurityRole Name=\"Calibration\"/>\n\
+    <SecurityRole Name=\"PDM\"/>\n\
+   </SecurityRoles>\n\
+  </SecurityMgr>\n\
+  <ComponentStream>\n\
+   <List>\n\
+    <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n\
+    <Component Classname=\"BuiltIn.Channel\" Name=\"Root.Sig\"><Props Type=\"f32\"/></Component>\n\
+   </List>\n\
+  </ComponentStream>\n\
+ </Project>\n\
+</MoTeCM1BuildSession>\n"
+}
+
+#[test]
+fn list_security_cli_human_falls_back_to_defaults() {
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("list_security_human.m1prj");
+    // minimal_project has no <SecurityMgr> => the four standard groups.
+    std::fs::write(&path, minimal_project()).unwrap();
+
+    let out = Command::new(bin)
+        .args(["list-security", "--project"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "list-security failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for g in ["Tune", "Calibration", "Master Calibration", "Resource"] {
+        assert!(
+            stdout.contains(g),
+            "default group {g} must appear: {stdout}"
+        );
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn list_security_cli_json_surfaces_custom_group() {
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("list_security_json.m1prj");
+    std::fs::write(&path, project_with_security_roles()).unwrap();
+
+    let out = Command::new(bin)
+        .args(["list-security", "--json", "--project"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "list-security --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.trim_start().starts_with('['), "must start with [");
+    assert!(stdout.trim_end().ends_with(']'), "must end with ]");
+    // The project-specific custom group a hard-coded editor list would miss.
+    assert!(
+        stdout.contains(r#""PDM""#),
+        "custom PDM group must be surfaced: {stdout}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn set_comment_cli_writes_cdata_and_clears() {
     let bin = env!("CARGO_BIN_EXE_m1-project");

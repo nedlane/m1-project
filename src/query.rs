@@ -1,9 +1,9 @@
 //! Read-only queries: enumerate components (`list_components`), the call-rate
-//! catalogue (`available_rates`) and group-relative trigger resolution
-//! (`resolve_trigger`).
+//! catalogue (`available_rates`), the security-group catalogue
+//! (`security_groups`) and group-relative trigger resolution (`resolve_trigger`).
 
-use crate::EditError;
 use crate::xml::*;
+use crate::{EditError, SECURITY_LEVELS};
 
 /// A component entry returned by [`list_components`].
 #[derive(Debug)]
@@ -182,6 +182,27 @@ pub fn available_rates(xml: &str) -> Result<Vec<String>, EditError> {
         .collect();
     out.sort();
     Ok(out)
+}
+
+/// The security groups a `set-security` / `create-*` value may legally use, for an
+/// editor picker — the read-side parity for `list-rates`.
+///
+/// Security groups are **project-defined**: a project declares them inline in
+/// `<SecurityMgr><SecurityRoles>` (the real AV-M1 project adds a custom `PDM`),
+/// so an editor cannot hard-code the list. When the project declares roles, those
+/// are returned in document order. When it has **no** `<SecurityMgr>` at all
+/// (minimal/hand-written projects and the manual's "Automatic" tag-derived
+/// security mode), the four documented standard groups ([`SECURITY_LEVELS`]) are
+/// returned as the fallback.
+///
+/// This is the same resolution `validate_security` performs, so the picker and the
+/// writer agree on one source of truth: every value this surfaces is one
+/// `set_security` accepts, and nothing it omits is.
+pub fn security_groups(xml: &str) -> Result<Vec<String>, EditError> {
+    Ok(match declared_security_roles(xml)? {
+        Some(roles) => roles,
+        None => SECURITY_LEVELS.iter().map(|s| s.to_string()).collect(),
+    })
 }
 
 // ---- shared helpers -------------------------------------------------------

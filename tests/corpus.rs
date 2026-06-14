@@ -195,6 +195,30 @@ fn validate_av_m1_corpus_clean() {
     );
 }
 
+#[test]
+fn security_groups_av_m1_surfaces_custom_pdm_group() {
+    let Some(xml) = av_corpus_project() else {
+        eprintln!("AV-M1 corpus absent; skipping security_groups test");
+        return;
+    };
+    // AV-M1 declares a custom `PDM` security group beyond the four standard ones,
+    // so an editor that hard-coded the list would guess wrong for this project.
+    let groups = m1_project::security_groups(&xml).expect("security_groups must succeed");
+    assert!(
+        groups.iter().any(|g| g == "PDM"),
+        "AV-M1's custom PDM group must be surfaced: {groups:?}"
+    );
+    // Every surfaced group must be one set_security accepts (single source of truth).
+    let ch = components_of_class(&xml, "BuiltIn.Channel")
+        .into_iter()
+        .next()
+        .expect("AV-M1 has a channel");
+    for g in &groups {
+        m1_project::set_security(&xml, &ch, g)
+            .unwrap_or_else(|e| panic!("set_security must accept surfaced group `{g}`: {e}"));
+    }
+}
+
 // ---- list-components corpus tests -------------------------------------------
 
 #[test]
