@@ -34,7 +34,7 @@ pub struct ComponentEntry {
 /// Enumerate all `<Component>` elements in document order.
 ///
 /// Only real components (those with a `Classname` attribute) are returned — the
-/// shared [`is_real_component`] predicate is the single source of truth for that
+/// shared `is_real_component` predicate is the single source of truth for that
 /// distinction. The `<Organisation>` section of a real `.m1prj` also contains
 /// `<Component>` nodes without `Classname`; those are view-only structural nodes
 /// and are excluded.
