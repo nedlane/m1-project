@@ -55,6 +55,10 @@ impl fmt::Display for Finding {
 ///    component to a group the project does not declare. Skipped entirely for
 ///    projects with no `<SecurityMgr>` (Automatic / tag-derived security mode),
 ///    where there is no explicit role list to check against.
+/// 8. No component's `Name` last segment is empty or whitespace-only — such a
+///    blank name is not a usable named object in M1-Build (defence-in-depth for
+///    files written by an older build or hand-edited; the create/rename verbs
+///    already refuse to produce one).
 pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
     let doc = parse_xml(xml)?;
     let mut findings: Vec<Finding> = Vec::new();
@@ -100,6 +104,21 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
         all_names.insert(nm.to_string());
         if classname == "BuiltIn.EventKernel" {
             valid_clocks.insert(nm.to_string());
+        }
+
+        // Check 8 (defence-in-depth for already-corrupt files): a component whose
+        // Name's last segment is whitespace-only (e.g. `Name="Root.  "`) is not a
+        // usable named object in M1-Build. The create/rename verbs refuse to
+        // produce one (see `validate_name_segment`), but a file written by an
+        // older build or hand-edited can still carry one.
+        let seg = nm.rsplit('.').next().unwrap_or(nm);
+        if seg.trim().is_empty() {
+            findings.push(Finding {
+                level: FindingLevel::Error,
+                path: nm.to_string(),
+                message: "component Name segment is empty or whitespace-only — M1-Build cannot use it as a named object"
+                    .into(),
+            });
         }
         by_parent
             .entry(parent_of(nm).unwrap_or("").to_string())

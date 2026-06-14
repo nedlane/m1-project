@@ -716,6 +716,15 @@ pub(crate) fn validate_name_segment(name: &str) -> Result<(), EditError> {
     if segment.is_empty() {
         return Err(EditError::Invalid("name must not end with a dot".into()));
     }
+    // A segment of only spaces/tabs is non-empty but would splice in a blank
+    // `Name="  "`, which M1-Build won't treat as a usable named object. Reject
+    // it, mirroring the `trim().is_empty()` guards the value-validators use
+    // (set_unit, set_quantity, add_tag, create_constant).
+    if segment.trim().is_empty() {
+        return Err(EditError::Invalid(
+            "name segment must not be whitespace-only".into(),
+        ));
+    }
     // M1 names: letters, digits, underscore, hyphen, space, parentheses are all
     // seen in the corpus.  The real constraint from the manual is "no dot in a
     // segment" (dots are reserved for path separation).  We enforce that only.
