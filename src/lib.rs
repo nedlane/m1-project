@@ -95,7 +95,7 @@ pub use edits::{
 };
 pub use query::{
     ComponentEntry, ScriptComponent, available_rates, list_components, resolve_trigger,
-    script_components,
+    script_components, security_groups,
 };
 pub use validate::{Finding, FindingLevel, validate};
 
@@ -351,6 +351,59 @@ mod tests {
                 .any(|f| f.message.contains("Security group")),
             "no <SecurityMgr> => no Check-7 finding: {findings:?}"
         );
+    }
+
+    #[test]
+    fn security_groups_lists_declared_roles_in_document_order() {
+        // A project with an explicit <SecurityMgr><SecurityRoles> exposes exactly
+        // those groups, in document order, so an editor picker can offer them —
+        // including the custom `PDM` a static four-name list would miss.
+        let groups = security_groups(PRJ_WITH_ROLES).unwrap();
+        assert_eq!(
+            groups,
+            vec![
+                "Resource",
+                "Master Calibration",
+                "Calibration",
+                "Tune",
+                "PDM"
+            ]
+        );
+    }
+
+    #[test]
+    fn security_groups_falls_back_to_defaults_without_security_mgr() {
+        // No <SecurityMgr> (minimal/Automatic-mode project) => the picker offers
+        // the four documented standard groups.
+        let groups = security_groups(PRJ).unwrap();
+        assert_eq!(groups, SECURITY_LEVELS.to_vec());
+    }
+
+    #[test]
+    fn security_groups_agrees_with_set_security() {
+        // The discovery verb and the writer must share one source of truth: every
+        // group the picker surfaces must be accepted by set_security, and nothing
+        // it omits should be. Otherwise an editor would offer a value the writer
+        // then rejects (or hide a value the writer accepts).
+        for prj in [PRJ, PRJ_WITH_ROLES] {
+            let target = if prj == PRJ {
+                "Root.Engine.Plain"
+            } else {
+                "Root.Sig"
+            };
+            let groups = security_groups(prj).unwrap();
+            for g in &groups {
+                assert!(
+                    set_security(prj, target, g).is_ok(),
+                    "set_security must accept a surfaced group `{g}`"
+                );
+            }
+            // A value outside the surfaced set is rejected.
+            assert!(
+                set_security(prj, target, "Definitely Not A Group").is_err(),
+                "set_security must reject a group the picker does not surface"
+            );
+        }
     }
 
     #[test]

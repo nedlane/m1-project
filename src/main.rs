@@ -288,6 +288,14 @@ enum Command {
         #[arg(long)]
         project: PathBuf,
     },
+    /// List the project's valid security groups (for a set-security picker).
+    ListSecurity {
+        #[arg(long)]
+        project: PathBuf,
+        /// Emit JSON (array of strings) instead of one group per line.
+        #[arg(long)]
+        json: bool,
+    },
     /// Validate the project for structural correctness (read-only; exit 1 on findings).
     Validate {
         #[arg(long)]
@@ -336,6 +344,7 @@ impl Command {
             | Command::RemoveTag { project, .. }
             | Command::SetCallRate { project, .. }
             | Command::ListRates { project, .. }
+            | Command::ListSecurity { project, .. }
             | Command::Validate { project, .. }
             | Command::ListComponents { project, .. } => project,
         }
@@ -365,6 +374,24 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 .map_err(|e| format!("{}: {e}", project.display()))?;
             for r in m1_project::available_rates(&xml)? {
                 println!("{r}");
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+        ListSecurity { project, json } => {
+            let (xml, _enc) = m1_workspace::read_text_with_encoding(project)
+                .map_err(|e| format!("{}: {e}", project.display()))?;
+            let groups = m1_project::security_groups(&xml)?;
+            if *json {
+                let body = groups
+                    .iter()
+                    .map(|g| json_string(g))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!("[{body}]");
+            } else {
+                for g in &groups {
+                    println!("{g}");
+                }
             }
             return Ok(ExitCode::SUCCESS);
         }
@@ -632,7 +659,11 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         AddTag { component, tag, .. } => m1_project::add_tag(&xml, component, tag)?,
         RemoveTag { component, tag, .. } => m1_project::remove_tag(&xml, component, tag)?,
         SetCallRate { script, rate, .. } => m1_project::set_call_rate(&xml, script, rate)?,
-        ListRates { .. } | Validate { .. } | ListComponents { .. } | RenameComponent { .. } => {
+        ListRates { .. }
+        | ListSecurity { .. }
+        | Validate { .. }
+        | ListComponents { .. }
+        | RenameComponent { .. } => {
             unreachable!()
         }
     };

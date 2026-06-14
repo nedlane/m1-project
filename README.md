@@ -59,10 +59,14 @@ and flags:
   bookkeeping M1-Build does (rename rewrites triggers that resolve into the
   subtree and renames the backing `.m1scr` on disk; delete refuses to orphan
   referencing scripts unless `--force`).
-- **`validate` / `list-components` / `list-rates`** — read-only queries.
-  `validate` mirrors M1-Build's own structural findings (referencing its
-  error numbers), so CI can catch what M1-Build would flag before the project
-  ever opens there.
+- **`validate` / `list-components` / `list-rates` / `list-security`** —
+  read-only queries. `validate` mirrors M1-Build's own structural findings
+  (referencing its error numbers), so CI can catch what M1-Build would flag
+  before the project ever opens there. `list-rates` and `list-security` expose
+  the project's valid call-rate clocks and security groups (both
+  project-specific — a project may declare custom security groups inline) so an
+  editor can offer a picker that always matches what `set-call-rate` /
+  `set-security` will accept.
 
 Global flags: `--dry-run` previews the edit as a unified diff (and reports the
 side effects it would perform, like script renames) while `--stdout` prints
