@@ -439,22 +439,7 @@ pub fn delete_component(
             // Extend the range backwards over the preceding indentation AND its
             // line break (LF or CRLF) so the deleted element's whole line goes,
             // leaving no blank line behind.
-            let start = n.range().start;
-            let before = &xml[..start];
-            let ws_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-            let prefix_is_ws = xml[ws_start..start].chars().all(|c| c == ' ' || c == '\t');
-            let actual_start = if prefix_is_ws && ws_start > 0 {
-                // ws_start is just past a '\n'; also consume a preceding '\r'.
-                if xml[..ws_start - 1].ends_with('\r') {
-                    ws_start - 2
-                } else {
-                    ws_start - 1
-                }
-            } else if prefix_is_ws {
-                ws_start
-            } else {
-                start
-            };
+            let actual_start = line_extended_start(xml, n.range().start);
             actual_start..n.range().end
         })
         .collect();
