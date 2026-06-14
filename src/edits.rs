@@ -816,23 +816,7 @@ fn set_default_attr(
         "\n{pindent} <Locale>\n{pindent}  <Default {attr}=\"{}\"/>\n{pindent} </Locale>",
         xml_escape(value)
     );
-    let new_props = if props_self_closing(props_text) {
-        let open = props_text
-            .trim_end()
-            .strip_suffix("/>")
-            .expect("checked by props_self_closing above");
-        format!("{open}>{block}\n{pindent}</Props>")
-    } else {
-        // `<Props …> … </Props>` — insert the Locale just before `</Props>`.
-        let close_idx = props_text
-            .rfind("</Props>")
-            .ok_or_else(|| EditError::Invalid("malformed <Props>".into()))?;
-        format!(
-            "{}{block}\n{pindent}{}",
-            props_text[..close_idx].trim_end(),
-            &props_text[close_idx..]
-        )
-    };
+    let new_props = insert_child_into_element(props_text, &block, &pindent, "</Props>")?;
     Ok(splice(&xml, props_range, &new_props))
 }
 
@@ -927,15 +911,9 @@ pub fn set_comment(xml: &str, component: &str, text: &str) -> Result<String, Edi
     let elem = &xml[loc.range.clone()];
     let indent = indent_at(xml, loc.range.start).to_string();
     let child_indent = format!("{indent} ");
-    if elem.trim_end().ends_with("/>") {
-        let open = elem
-            .trim_end()
-            .strip_suffix("/>")
-            .expect("checked by ends_with(\"/>\") above");
-        let new = format!(
-            "{open}>\n{child_indent}{}\n{indent}</Component>",
-            new_element(&child_indent)
-        );
+    if props_self_closing(elem) {
+        let child_block = format!("\n{child_indent}{}", new_element(&child_indent));
+        let new = reopen_self_closing(elem, &child_block, &format!("\n{indent}</Component>"));
         Ok(splice(xml, loc.range, &new))
     } else {
         // Insert before </Component>, replacing the whitespace run that
@@ -1066,22 +1044,8 @@ pub fn add_tag(xml: &str, component: &str, tag: &str) -> Result<String, EditErro
     if let Some(range) = user_tags_range(&xml, component)? {
         let indent = indent_at(&xml, range.start).to_string();
         let text = &xml[range.clone()];
-        let new = if props_self_closing(text) {
-            let open = text
-                .trim_end()
-                .strip_suffix("/>")
-                .expect("checked by props_self_closing");
-            format!("{open}>\n{indent} {entry}\n{indent}</List.UserTags>")
-        } else {
-            let close = text
-                .rfind("</List.UserTags>")
-                .ok_or_else(|| EditError::Invalid("malformed <List.UserTags>".into()))?;
-            format!(
-                "{}\n{indent} {entry}\n{indent}{}",
-                text[..close].trim_end(),
-                &text[close..]
-            )
-        };
+        let block = format!("\n{indent} {entry}");
+        let new = insert_child_into_element(text, &block, &indent, "</List.UserTags>")?;
         return Ok(splice(&xml, range, &new));
     }
 
@@ -1093,22 +1057,7 @@ pub fn add_tag(xml: &str, component: &str, tag: &str) -> Result<String, EditErro
     let props_text = &xml[props_range.clone()];
     let block =
         format!("\n{pindent} <List.UserTags>\n{pindent}  {entry}\n{pindent} </List.UserTags>");
-    let new_props = if props_self_closing(props_text) {
-        let open = props_text
-            .trim_end()
-            .strip_suffix("/>")
-            .expect("checked by props_self_closing");
-        format!("{open}>{block}\n{pindent}</Props>")
-    } else {
-        let close = props_text
-            .rfind("</Props>")
-            .ok_or_else(|| EditError::Invalid("malformed <Props>".into()))?;
-        format!(
-            "{}{block}\n{pindent}{}",
-            props_text[..close].trim_end(),
-            &props_text[close..]
-        )
-    };
+    let new_props = insert_child_into_element(props_text, &block, &pindent, "</Props>")?;
     Ok(splice(&xml, props_range, &new_props))
 }
 
