@@ -1146,6 +1146,30 @@ mod tests {
     }
 
     #[test]
+    fn set_validation_rejects_non_finite_bounds() {
+        // NaN/Infinity serialise to garbage tokens (NaNe+00, infe+00) that
+        // M1-Build can't read back as an f64, silently corrupting ValMin/ValMax.
+        // The min>max guard can't catch them (every NaN comparison is false and
+        // Infinity passes the ordering check), so reject them explicitly.
+        for (min, max) in [
+            (f64::NAN, 1.0),
+            (0.0, f64::NAN),
+            (f64::INFINITY, 1.0),
+            (0.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 1.0),
+            (0.0, f64::NEG_INFINITY),
+        ] {
+            assert!(
+                matches!(
+                    set_validation(PRJ, "Root.Engine.Speed", "MinMax", Some(min), Some(max)),
+                    Err(EditError::Invalid(_))
+                ),
+                "non-finite bound ({min}, {max}) must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn set_format_dps_and_display_range_on_default() {
         // Start from a channel with an existing <Default Unit> so we exercise the
         // "add attr to existing <Default>" path and never duplicate <Locale>.
@@ -1187,6 +1211,28 @@ mod tests {
             set_display_range(PRJ, "Root.Engine.Speed", 5.0, 1.0),
             Err(EditError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn set_display_range_rejects_non_finite_bounds() {
+        // As with set_validation, NaN/Infinity would serialise to invalid
+        // Min/Max tokens M1-Build can't parse; reject them at the boundary.
+        for (min, max) in [
+            (f64::NAN, 1.0),
+            (0.0, f64::NAN),
+            (f64::INFINITY, 1.0),
+            (0.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 1.0),
+            (0.0, f64::NEG_INFINITY),
+        ] {
+            assert!(
+                matches!(
+                    set_display_range(PRJ, "Root.Engine.Speed", min, max),
+                    Err(EditError::Invalid(_))
+                ),
+                "non-finite bound ({min}, {max}) must be rejected"
+            );
+        }
     }
 
     #[test]
