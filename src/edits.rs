@@ -360,26 +360,24 @@ pub fn delete_component(
     // For ordinary (non-Events) components: no other component field holds an
     // absolute path to another component (confirmed by corpus grep — only
     // `SelectedTrigger` and even that is group-relative pointing at Events).
-    let deleted_names: std::collections::HashSet<String> = doc
-        .descendants()
-        .filter(is_real_component)
-        .filter_map(|n| n.attribute("Name"))
-        .filter(|nm| *nm == name || nm.starts_with(&prefix))
-        .map(str::to_string)
-        .collect();
-
-    // Build absolute paths for all clock components under the deleted set.
-    let deleted_clocks: std::collections::HashSet<String> = deleted_names
-        .iter()
-        .filter(|nm| {
-            doc.descendants()
-                .filter(is_real_component)
-                .find(|n| n.attribute("Name") == Some(nm.as_str()))
-                .map(|n| n.attribute("Classname") == Some("BuiltIn.EventKernel"))
-                .unwrap_or(false)
-        })
-        .cloned()
-        .collect();
+    // Single pass over the document: collect every deleted component's name and,
+    // simultaneously, the subset of those names that are clocks
+    // (`BuiltIn.EventKernel`).  Classifying clocks here avoids a fresh
+    // `descendants()` walk per deleted name (which was O(deleted × total)).
+    let mut deleted_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut deleted_clocks: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for n in doc.descendants().filter(is_real_component) {
+        let Some(nm) = n.attribute("Name") else {
+            continue;
+        };
+        if nm != name && !nm.starts_with(&prefix) {
+            continue;
+        }
+        deleted_names.insert(nm.to_string());
+        if n.attribute("Classname") == Some("BuiltIn.EventKernel") {
+            deleted_clocks.insert(nm.to_string());
+        }
+    }
 
     // For every component NOT being deleted, resolve its SelectedTrigger and
     // see if it lands on a deleted clock.
