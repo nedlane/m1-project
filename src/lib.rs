@@ -660,6 +660,29 @@ mod tests {
         assert!(out.contains(r#"Name="Root.NewTop""#));
     }
 
+    #[test]
+    fn create_group_rejects_whitespace_only_segment() {
+        // A trailing all-whitespace segment must be refused, not spliced in as
+        // `Name="Root.  "` (M1-Build won't treat it as a usable named object).
+        assert!(matches!(
+            create_group(PRJ, "Root.  "),
+            Err(EditError::Invalid(_))
+        ));
+        assert!(matches!(
+            create_group(PRJ, "Root.Engine.\t"),
+            Err(EditError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn create_group_rejects_all_whitespace_name() {
+        // No dot at all, just whitespace: segment == name, still invalid.
+        assert!(matches!(
+            create_group(PRJ, "   "),
+            Err(EditError::Invalid(_))
+        ));
+    }
+
     // ---- #22 delete_component -----------------------------------------------
 
     #[test]
@@ -833,6 +856,19 @@ mod tests {
     }
 
     #[test]
+    fn rename_component_rejects_whitespace_only_new_name() {
+        // A whitespace-only new name would produce `Name="…\t"` — refuse it.
+        assert!(matches!(
+            rename_component(PRJ, "Root.Engine", "\t"),
+            Err(EditError::Invalid(_))
+        ));
+        assert!(matches!(
+            rename_component(PRJ, "Root.Engine", "   "),
+            Err(EditError::Invalid(_))
+        ));
+    }
+
+    #[test]
     fn rename_component_warns_about_script_files() {
         // Root.Engine.Update is a MethodUser → should report a .m1scr rename.
         let (_, renames) = rename_component(PRJ, "Root.Engine", "Motor").unwrap();
@@ -922,6 +958,22 @@ mod tests {
         assert!(
             findings.iter().any(|f| f.message.contains("duplicate")),
             "duplicate sibling should produce a finding, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_detects_whitespace_only_name_segment() {
+        let prj = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession><Project Name="T"><ComponentStream><List>
+<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.  "/>
+</List></ComponentStream></Project></MoTeCM1BuildSession>"#;
+        let findings = validate(prj).unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.path == "Root.  " && f.message.contains("whitespace-only")),
+            "a whitespace-only Name segment should produce a finding, got: {findings:?}"
         );
     }
 
