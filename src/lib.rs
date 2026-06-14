@@ -627,6 +627,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn delete_consumes_leading_indentation_no_orphan_whitespace() {
+        // Deleting a `<List>` component must back-extend over its leading
+        // indentation and the preceding line break (the `line_extended_start`
+        // contract), leaving no orphaned indentation on its own line.
+        let out = delete_component(PRJ, "Root.Engine.Plain", false, false).unwrap();
+        parses(&out);
+        // No line should be left consisting solely of indentation whitespace
+        // where the deleted element used to be.
+        assert!(
+            !out.lines().any(|l| !l.is_empty() && l.trim().is_empty()),
+            "orphan indentation-only line left behind after delete:\n{out:?}"
+        );
+        // And the leading whitespace of the deleted line is gone with it: the
+        // following sibling keeps its own indentation intact, unchanged.
+        assert!(
+            out.contains(
+                "\n    <Component Classname=\"BuiltIn.MethodUser\" Name=\"Root.Engine.Update\"/>"
+            ),
+            "the following sibling's indentation must be untouched:\n{out}"
+        );
+    }
+
     // ---- #23 rename_component -----------------------------------------------
 
     #[test]
