@@ -786,6 +786,11 @@ pub fn set_display_range(
     min: f64,
     max: f64,
 ) -> Result<String, EditError> {
+    if !min.is_finite() || !max.is_finite() {
+        return Err(EditError::Invalid(
+            "display bounds must be finite numbers".into(),
+        ));
+    }
     if min > max {
         return Err(EditError::Invalid(format!(
             "display min ({min}) must not exceed max ({max})"
@@ -1019,6 +1024,11 @@ pub fn set_validation(
             let max = max.ok_or_else(|| {
                 EditError::Invalid("MinMax validation needs --min and --max".into())
             })?;
+            if !min.is_finite() || !max.is_finite() {
+                return Err(EditError::Invalid(
+                    "validation bounds must be finite numbers".into(),
+                ));
+            }
             if min > max {
                 return Err(EditError::Invalid(format!(
                     "validation min ({min}) must not exceed max ({max})"
@@ -1045,6 +1055,10 @@ pub fn set_validation(
 /// sign and a ≥2-digit exponent (`1.00000000000000000e+00`). M1 re-reads the
 /// value as the same `f64` regardless, but matching the form keeps diffs clean.
 pub(crate) fn format_motec_float(v: f64) -> String {
+    // Non-finite values produce nonsense tokens ("NaNe+00", "infe+00") that
+    // M1-Build can't parse back as an f64. Callers must reject them first
+    // (set_validation / set_display_range guard at the user-facing boundary).
+    debug_assert!(v.is_finite(), "format_motec_float requires a finite value");
     let s = format!("{v:.17e}"); // e.g. "1.00000000000000000e0", "5.00000000000000000e-1"
     let (mantissa, exp) = s.split_once('e').unwrap_or((s.as_str(), "0"));
     let (sign, digits) = match exp.strip_prefix('-') {

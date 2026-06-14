@@ -687,3 +687,74 @@ fn create_parameter_cli_smoke() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn set_validation_rejects_non_finite_min() {
+    // clap parses "NaN" as a valid f64, so the bound reaches set_validation; a
+    // non-finite bound would serialise to a garbage token M1-Build can't read
+    // back, so the command must fail and leave the project untouched.
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("set_validation_nan.m1prj");
+    std::fs::write(&path, minimal_project()).unwrap();
+
+    let out = Command::new(bin)
+        .args([
+            "set-validation",
+            "--component",
+            "Root.Engine.Speed",
+            "--type",
+            "MinMax",
+            "--min",
+            "NaN",
+            "--max",
+            "1.0",
+            "--project",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a non-finite validation bound must fail"
+    );
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !written.contains("ValMin=") && !written.contains("NaN"),
+        "the rejected bound must not be written: {written}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn set_display_range_rejects_non_finite_max() {
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("set_display_range_inf.m1prj");
+    std::fs::write(&path, minimal_project()).unwrap();
+
+    let out = Command::new(bin)
+        .args([
+            "set-display-range",
+            "--component",
+            "Root.Engine.Speed",
+            "--min",
+            "0.0",
+            "--max",
+            "inf",
+            "--project",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a non-finite display bound must fail"
+    );
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !written.contains("Max=") && !written.contains("inf"),
+        "the rejected bound must not be written: {written}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
