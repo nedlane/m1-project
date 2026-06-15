@@ -143,8 +143,8 @@ dependencies = [
 
 [[package]]
 name = "m1-workspace"
-version = "0.10.0"
-source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.10.0#ec54c4617260a66d016d08629f3e2ae3beac413f"
+version = "0.11.0"
+source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.11.0#f137b67fc6defee0077981bd0f55a60652330a38"
 dependencies = [
  "serde",
  "serde_ignored",
