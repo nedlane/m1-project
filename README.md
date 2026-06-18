@@ -53,8 +53,8 @@ and flags:
   groups, and (scheduled) functions, including the backing `.m1scr` where
   M1-Build would create one.
 - **`set-*` / `add-tag` / `remove-tag`** — the M1-Build *Properties* rows:
-  security, type, unit, physical quantity, validation bounds, display
-  format, tags, comments, and script call rate.
+  security, type, a constant's literal value, unit, physical quantity,
+  validation bounds, display format, tags, comments, and script call rate.
 - **`delete-component` / `rename-component`** — structure edits with the
   bookkeeping M1-Build does (rename rewrites triggers that resolve into the
   subtree and renames the backing `.m1scr` on disk; delete refuses to orphan

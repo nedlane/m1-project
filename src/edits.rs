@@ -177,6 +177,31 @@ pub fn create_constant(xml: &str, name: &str, value: &str) -> Result<String, Edi
     })
 }
 
+/// Set (or replace) an existing `BuiltIn.Constant`'s literal `Value`
+/// (`<Props Value="…">`) — the M1-Build *Value* row, e.g. a CAN-bus selector
+/// from `CAN Bus 1` to `CAN Bus 2`. The write-side counterpart of
+/// [`create_constant`]: change a constant in place rather than delete-and-recreate
+/// (which would lose its other Props — security, tags, comment).
+///
+/// The target must be a `BuiltIn.Constant` (the value-bearing class); any other
+/// class is rejected rather than silently splicing a stray `Value` attribute onto
+/// a `<Props>` that has no *Value* row.
+pub fn set_value(xml: &str, component: &str, value: &str) -> Result<String, EditError> {
+    if value.trim().is_empty() {
+        return Err(EditError::Invalid(
+            "constant value must not be empty".into(),
+        ));
+    }
+    let loc = locate(xml, component)?;
+    if loc.classname != "BuiltIn.Constant" {
+        return Err(EditError::Invalid(format!(
+            "`{component}` is a {} — only BuiltIn.Constant components have a Value row",
+            loc.classname
+        )));
+    }
+    set_props_attr(xml, component, "Value", value)
+}
+
 /// One axis of a [`create_table`] table: the source channel reference and an
 /// optional `MaxSites` site count.
 #[derive(Debug, Clone)]
