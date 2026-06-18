@@ -124,6 +124,7 @@ pub fn create_channel(
     unit: Option<&str>,
     security: Option<&str>,
 ) -> Result<String, EditError> {
+    validate_name_segment(name)?;
     if let Some(t) = ty {
         validate_type(t)?;
     }
@@ -145,6 +146,7 @@ pub fn create_parameter(
     unit: Option<&str>,
     security: Option<&str>,
 ) -> Result<String, EditError> {
+    validate_name_segment(name)?;
     if let Some(t) = ty {
         validate_type(t)?;
     }

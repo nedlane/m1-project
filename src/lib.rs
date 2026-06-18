@@ -207,6 +207,34 @@ mod tests {
     }
 
     #[test]
+    fn create_channel_rejects_blank_leaf_name() {
+        // A trailing-dot path (`Root.Engine.`) has an empty leaf segment, and a
+        // whitespace-only leaf (`Root.Engine.  `) would splice in an unusable
+        // `Name="…"` M1-Build cannot bind. Both must be rejected, like every
+        // other create verb (create_group/create_constant/…).
+        assert!(matches!(
+            create_channel(PRJ, "Root.Engine.", None, None, None),
+            Err(EditError::Invalid(_))
+        ));
+        assert!(matches!(
+            create_channel(PRJ, "Root.Engine.  ", None, None, None),
+            Err(EditError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn create_parameter_rejects_blank_leaf_name() {
+        assert!(matches!(
+            create_parameter(PRJ, "Root.Engine.", None, None, None),
+            Err(EditError::Invalid(_))
+        ));
+        assert!(matches!(
+            create_parameter(PRJ, "Root.Engine.  ", None, None, None),
+            Err(EditError::Invalid(_))
+        ));
+    }
+
+    #[test]
     fn set_security_replaces_existing() {
         let out = set_security(PRJ, "Root.Engine.Speed", "Calibration").unwrap();
         parses(&out);
