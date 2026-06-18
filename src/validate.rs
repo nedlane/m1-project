@@ -258,7 +258,9 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
     // Properties through the <Organisation> view tree, so the two must agree:
     //   - a view node with no matching real component makes M1-Build FAIL TO LOAD
     //     the project ("Unable to find Properties for object 'Root.X'"), and
-    //   - a real component absent from the view tree will not display.
+    //   - a real component absent from the view tree cannot be bound either:
+    //     M1-Build never builds its Properties, so scripts referencing it error
+    //     1338 ("Object/Local/Method does not exist"). Both halves are fatal.
     // (Projects without any <Organisation> skip this check entirely.)
     if !org_roots.is_empty() {
         let mut org_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -279,9 +281,9 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
         for nm in &all_names {
             if !org_paths.contains(nm) {
                 findings.push(Finding {
-                    level: FindingLevel::Warning,
+                    level: FindingLevel::Error,
                     path: nm.clone(),
-                    message: "component is absent from the <Organisation> view (will not display in M1-Build)"
+                    message: "component is absent from the <Organisation> view (M1-Build cannot bind its Properties; references error 1338)"
                         .into(),
                 });
             }
