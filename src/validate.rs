@@ -12,6 +12,13 @@ pub struct Finding {
     pub level: FindingLevel,
     pub path: String,
     pub message: String,
+    /// The M1-Build error number this finding mirrors, when one is known
+    /// (e.g. `1601` "No security group selected", `1338` "Object does not
+    /// exist", `1024` "Missing code"). `None` for checks with no documented
+    /// M1-Build code (duplicate-name, blank-name, missing-trigger). Surfaced in
+    /// `validate --json` as a machine-readable `code` field so a CI consumer can
+    /// triage by error number without parsing the free-text `message`.
+    pub code: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +128,7 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                 path: nm.to_string(),
                 message: "component Name segment is empty or whitespace-only — M1-Build cannot use it as a named object"
                     .into(),
+                code: None,
             });
         }
         by_parent
@@ -144,6 +152,7 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                 message:
                     "scheduled function has no event selected (SelectedTrigger) — it will never run"
                         .into(),
+                code: None,
             });
         }
 
@@ -162,6 +171,7 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                 path: nm.to_string(),
                 message: "no security group selected — a channel/parameter needs a Security level"
                     .into(),
+                code: Some(1601),
             });
         }
 
@@ -181,6 +191,7 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                 message: format!(
                     "Security group `{sec}` is not declared in the project's <SecurityRoles> — M1-Build cannot bind it"
                 ),
+                code: Some(1601),
             });
         }
     }
@@ -208,6 +219,7 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                     level: FindingLevel::Error,
                     path: path.clone(),
                     message: format!("duplicate sibling Name `{seg}` under `{parent_key}`"),
+                    code: None,
                 });
             }
         }
@@ -238,6 +250,7 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                     message: format!(
                         "cannot resolve SelectedTrigger `{trigger}` (malformed relative path)"
                     ),
+                    code: None,
                 });
             }
             Some(abs) => {
@@ -248,6 +261,7 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                         message: format!(
                             "SelectedTrigger `{trigger}` resolves to `{abs}` which is not a BuiltIn.EventKernel clock"
                         ),
+                        code: None,
                     });
                 }
             }
@@ -275,6 +289,7 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                     message:
                         "<Organisation> view references a component missing from <List> (M1-Build cannot bind its Properties)"
                             .into(),
+                    code: Some(1338),
                 });
             }
         }
@@ -285,6 +300,7 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                     path: nm.clone(),
                     message: "component is absent from the <Organisation> view (M1-Build cannot bind its Properties; references error 1338)"
                         .into(),
+                    code: Some(1338),
                 });
             }
         }

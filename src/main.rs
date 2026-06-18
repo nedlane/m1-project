@@ -436,11 +436,19 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                         m1_project::FindingLevel::Error => "error",
                         m1_project::FindingLevel::Warning => "warning",
                     };
+                    // The M1-Build error number, when known, as a bare JSON
+                    // number (or `null`) — machine-readable so a CI consumer can
+                    // triage/suppress by code without parsing the message (#83).
+                    let code = match f.code {
+                        Some(c) => c.to_string(),
+                        None => "null".to_string(),
+                    };
                     println!(
-                        "  {{\"level\":{},\"path\":{},\"message\":{}}}{}",
+                        "  {{\"level\":{},\"path\":{},\"message\":{},\"code\":{}}}{}",
                         json_string(level),
                         json_string(&f.path),
                         json_string(&f.message),
+                        code,
                         comma
                     );
                 }
@@ -722,6 +730,7 @@ fn missing_code_findings(project: &Path, xml: &str) -> Vec<m1_project::Finding> 
                 level: m1_project::FindingLevel::Error,
                 path: s.path.clone(),
                 message: format!("missing code: backing script `{}` is empty", s.filename),
+                code: Some(1024),
             });
         }
     }
