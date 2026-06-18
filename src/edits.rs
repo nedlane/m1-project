@@ -877,10 +877,12 @@ pub fn set_call_rate(xml: &str, script: &str, rate: &str) -> Result<String, Edit
             available.join(", ")
         )));
     }
-    // Trigger is group-relative: one `Parent.` per dot in the script's path lands
-    // on `Root`, then `.Events.<leaf>` (every clock lives at `Root.Events.*`).
-    let parents = "Parent.".repeat(script.matches('.').count());
-    let trigger = format!("{parents}Events.{leaf}");
+    // Trigger is group-relative. Reuse the shared longest-common-ancestor builder
+    // (same one `create_table` and `rename_component` use) so all relative-path
+    // construction agrees on the minimal `Parent.…` form M1-Build actually stores
+    // — e.g. a script directly under `Root.Events` yields `Parent.<leaf>`, not the
+    // non-minimal `Parent.Parent.Events.<leaf>`.
+    let trigger = build_trigger(script, &clock);
     set_props_attr(xml, script, "SelectedTrigger", &trigger)
 }
 

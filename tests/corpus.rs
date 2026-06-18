@@ -123,8 +123,21 @@ fn set_call_rate_matches_corpus_trigger_format() {
 
     let out = m1_project::set_call_rate(&xml, &script, n).unwrap();
     roxmltree::Document::parse(&out).expect("valid XML");
-    let parents = "Parent.".repeat(script.matches('.').count());
-    let expected = format!(r#"SelectedTrigger="{parents}Events.On {n}Hz""#);
+    // The trigger is the *minimal* group-relative path (longest-common-ancestor
+    // between the script and the clock) — the same form M1-Build stores and the
+    // shared `build_trigger` builder produces — not a non-minimal "one `Parent.`
+    // per dot, then re-descend via `Events.`" reconstruction.
+    let clock = format!("Root.Events.On {n}Hz");
+    let owner_segs: Vec<&str> = script.split('.').collect();
+    let clock_segs: Vec<&str> = clock.split('.').collect();
+    let common = owner_segs
+        .iter()
+        .zip(clock_segs.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let climb = "Parent.".repeat(owner_segs.len() - common);
+    let tail = clock_segs[common..].join(".");
+    let expected = format!(r#"SelectedTrigger="{climb}{tail}""#);
     assert!(
         out.contains(&expected),
         "expected trigger {expected} for script {script}"

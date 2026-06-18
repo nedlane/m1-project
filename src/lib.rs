@@ -521,6 +521,31 @@ mod tests {
     }
 
     #[test]
+    fn set_call_rate_uses_minimal_relative_trigger_under_events() {
+        // A script nested *directly* under `Root.Events` shares the `Root.Events`
+        // ancestor with the clock, so the minimal group-relative trigger climbs
+        // just one level: `Parent.On 100Hz` — the exact form M1-Build stores. The
+        // earlier hand-rolled "one `Parent.` per dot" formulation always climbed
+        // to `Root` and re-descended via `Events.`, emitting a non-minimal
+        // `Parent.Parent.Events.On 100Hz`. set_call_rate must reuse build_trigger
+        // (the longest-common-ancestor builder) so it agrees with create_table /
+        // rename_component.
+        let prj = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession><Project Name="T"><ComponentStream><List>
+<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.Events"/>
+<Component Classname="BuiltIn.MethodUser" Name="Root.Events.Tick"/>
+<Component Classname="BuiltIn.EventKernel" Name="Root.Events.On 100Hz"/>
+</List></ComponentStream></Project></MoTeCM1BuildSession>"#;
+        let out = set_call_rate(prj, "Root.Events.Tick", "100").unwrap();
+        parses(&out);
+        assert!(
+            out.contains(r#"SelectedTrigger="Parent.On 100Hz""#),
+            "expected minimal `Parent.On 100Hz`, got: {out}"
+        );
+    }
+
+    #[test]
     fn set_call_rate_startup() {
         let out = set_call_rate(PRJ, "Root.Engine.Update", "startup").unwrap();
         assert!(out.contains(r#"SelectedTrigger="Parent.Parent.Events.On Startup""#));
