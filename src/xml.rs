@@ -495,6 +495,30 @@ pub(crate) fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Apply a batch of `(byte-range, replacement)` edits to `s`.
+///
+/// The edits are sorted descending by range start and then applied one at a
+/// time, so that splicing an earlier (higher-offset) range never invalidates
+/// the byte offsets of a later (lower-offset) one. This is the single tested
+/// home of the "sort splices descending, apply right-to-left" invariant that
+/// `rename_component`/`delete_component` rely on.
+///
+/// Replacements are inserted verbatim — callers must XML-escape attribute
+/// values at the push site (deletions pass `String::new()` and must not).
+/// Ranges are assumed non-overlapping (the callers collect each from a distinct
+/// attribute node or element); overlapping ranges are applied in descending
+/// order without further checking.
+pub(crate) fn apply_splices_desc(
+    mut s: String,
+    mut fixes: Vec<(std::ops::Range<usize>, String)>,
+) -> String {
+    fixes.sort_by_key(|f| std::cmp::Reverse(f.0.start));
+    for (range, replacement) in fixes {
+        s = splice(&s, range, &replacement);
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,5 +626,29 @@ mod tests {
         // Not self-closing and no close tag present -> malformed.
         let err = insert_child_into_element("<Props Type=\"f32\">", "\n X", "", "</Props>");
         assert!(matches!(err, Err(EditError::Invalid(_))));
+    }
+
+    #[test]
+    fn apply_splices_desc_applies_out_of_order_ranges_correctly() {
+        // Three replacements supplied in ascending (wrong) order with differing
+        // widths. If they were applied left-to-right the later offsets would be
+        // invalidated; the helper must sort descending and apply right-to-left
+        // so every range still lines up with the original string.
+        let s = "AAA BBB CCC".to_string();
+        let fixes = vec![
+            (0..3, "wxyz".to_string()),   // AAA -> wxyz (grows)
+            (4..7, "q".to_string()),      // BBB -> q (shrinks)
+            (8..11, "mmmmm".to_string()), // CCC -> mmmmm (grows)
+        ];
+        assert_eq!(apply_splices_desc(s, fixes), "wxyz q mmmmm");
+    }
+
+    #[test]
+    fn apply_splices_desc_handles_deletions_with_empty_replacement() {
+        // Removal-style edits (empty replacement), supplied out of order, must
+        // splice out exactly their ranges without disturbing the rest.
+        let s = "0123456789".to_string();
+        let fixes = vec![(2..4, String::new()), (6..8, String::new())];
+        assert_eq!(apply_splices_desc(s, fixes), "014589");
     }
 }

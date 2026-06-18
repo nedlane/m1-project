@@ -450,26 +450,22 @@ pub fn delete_component(
     // real .m1prj lists components in a flat `<List>` with siblings of other
     // subtrees interspersed).  A single min→max span would accidentally erase
     // those intervening siblings, so each element is removed individually.
-    let mut ranges_to_remove: Vec<std::ops::Range<usize>> = doc
+    let ranges_to_remove: Vec<(std::ops::Range<usize>, String)> = doc
         .descendants()
         .filter(is_real_component)
         .filter(|n| n.attribute("Name").map(|nm| deleted_names.contains(nm)) == Some(true))
         .map(|n| {
             // Extend the range backwards over the preceding indentation AND its
             // line break (LF or CRLF) so the deleted element's whole line goes,
-            // leaving no blank line behind.
+            // leaving no blank line behind. Removal => empty (unescaped) replacement.
             let actual_start = line_extended_start(xml, n.range().start);
-            actual_start..n.range().end
+            (actual_start..n.range().end, String::new())
         })
         .collect();
 
-    // Sort descending by start so right-to-left application keeps offsets valid.
-    ranges_to_remove.sort_by_key(|r| std::cmp::Reverse(r.start));
-
-    let mut result = xml.to_string();
-    for range in ranges_to_remove {
-        result = splice(&result, range, "");
-    }
+    // Splice the removals out right-to-left so earlier ranges don't invalidate
+    // later byte offsets.
+    let mut result = apply_splices_desc(xml.to_string(), ranges_to_remove);
 
     // Remove the matching `<Organisation>` view node. Its descendants are nested
     // inside it, so the single removal takes the whole subtree with it — and the
@@ -593,13 +589,10 @@ pub fn rename_component(
             };
             if let Some((_, new)) = to_rename.iter().find(|(old, _)| old == nm) {
                 let attr = n.attribute_node("Name").unwrap();
-                renames.push((attr.range_value(), new.clone()));
+                renames.push((attr.range_value(), xml_escape(new)));
             }
         }
-        renames.sort_by_key(|r| std::cmp::Reverse(r.0.start));
-        for (range, new_val) in renames {
-            result = splice(&result, range, &xml_escape(&new_val));
-        }
+        result = apply_splices_desc(result, renames);
     }
 
     // Pass 2: fix SelectedTrigger references.
@@ -642,12 +635,9 @@ pub fn rename_component(
             };
             // Rebuild the trigger as group-relative from the NEW owner name.
             let new_trigger = build_trigger(owner_new, &new_abs);
-            trigger_fixes.push((trigger_attr.range_value(), new_trigger));
+            trigger_fixes.push((trigger_attr.range_value(), xml_escape(&new_trigger)));
         }
-        trigger_fixes.sort_by_key(|r| std::cmp::Reverse(r.0.start));
-        for (range, new_val) in trigger_fixes {
-            result = splice(&result, range, &xml_escape(&new_val));
-        }
+        result = apply_splices_desc(result, trigger_fixes);
     }
 
     // Pass 3: update the `Filename` of every renamed script component to its new
@@ -666,13 +656,10 @@ pub fn rename_component(
                 continue;
             }
             if let Some(fa) = n.attribute_node("Filename") {
-                fixes.push((fa.range_value(), script_relpath(owner_new)));
+                fixes.push((fa.range_value(), xml_escape(&script_relpath(owner_new))));
             }
         }
-        fixes.sort_by_key(|r| std::cmp::Reverse(r.0.start));
-        for (range, new_val) in fixes {
-            result = splice(&result, range, &xml_escape(&new_val));
-        }
+        result = apply_splices_desc(result, fixes);
     }
 
     // Pass 4: rename the matching `<Organisation>` view node. The view tree uses
