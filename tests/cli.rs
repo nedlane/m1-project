@@ -566,6 +566,58 @@ fn validate_json_emits_machine_findings() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[test]
+fn validate_json_emits_m1build_error_codes() {
+    // The README markets `validate` as referencing M1-Build's error numbers; the
+    // --json output must therefore carry a machine-readable `code` per finding so
+    // a CI consumer can triage by error number without parsing the message (#83).
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("validate_codes.m1prj");
+    // A channel with NO <Props Security> → "no security group selected"
+    // (M1-Build Error 1601). Plus an <Organisation> view that omits that same
+    // channel → "absent from the <Organisation> view" (Error 1338). The rest of
+    // the List is mirrored in the view so only the bare channel is flagged twice.
+    let xml = "<?xml version=\"1.0\"?>\n\
+<MoTeCM1BuildSession>\n\
+ <Project Name=\"T\">\n\
+  <ComponentStream>\n\
+   <List>\n\
+    <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n\
+    <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root.Engine\"/>\n\
+    <Component Classname=\"BuiltIn.Channel\" Name=\"Root.Engine.Bare\"/>\n\
+   </List>\n\
+   <Organisation>\n\
+    <Component Name=\"Root\">\n\
+     <Component Name=\"Engine\"/>\n\
+    </Component>\n\
+   </Organisation>\n\
+  </ComponentStream>\n\
+ </Project>\n\
+</MoTeCM1BuildSession>\n";
+    std::fs::write(&path, xml).unwrap();
+
+    let out = Command::new(bin)
+        .args(["validate", "--json", "--project"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    serde_json_sanity(&stdout);
+
+    // The 1601 (no security) and 1338 (org-tree mismatch) codes must appear as
+    // structured number fields, not buried in free text.
+    assert!(
+        stdout.contains(r#""code":1601"#),
+        "missing-security finding must carry code 1601: {stdout}"
+    );
+    assert!(
+        stdout.contains(r#""code":1338"#),
+        "org-tree-mismatch finding must carry code 1338: {stdout}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
 /// m1-project deliberately has no serde dependency; sanity-parse the JSON with
 /// a tiny structural check instead (balanced brackets, no trailing comma).
 fn serde_json_sanity(s: &str) {
