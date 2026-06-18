@@ -1761,6 +1761,10 @@ mod tests {
             script_relpath("Root.Control.Drive State.Update"),
             "Control.Drive State.Update.m1scr"
         );
+        // A name without the `Root.` prefix is passed through unchanged (just
+        // gains the extension) — this locks the equivalence with
+        // `m1_workspace::strip_root`, the shared owner of the prefix convention.
+        assert_eq!(script_relpath("Foo"), "Foo.m1scr");
     }
 
     #[test]
