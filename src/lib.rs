@@ -1340,6 +1340,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn validate_flags_component_absent_from_organisation_as_error() {
+        // The mirror of the dangling-node case: a real component present in
+        // <List> but missing from the <Organisation> view. M1-Build cannot bind
+        // its Properties (references hit error 1338), so this is fatal, not a
+        // cosmetic "won't display" warning.
+        let prj = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession><Project Name="T"><ComponentStream>
+<List>
+<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.Hidden"/>
+</List>
+<Organisation>
+<Component Name="Root"/>
+</Organisation>
+</ComponentStream></Project></MoTeCM1BuildSession>"#;
+        let findings = validate(prj).unwrap();
+        assert!(
+            findings.iter().any(|f| f.path == "Root.Hidden"
+                && f.level == FindingLevel::Error
+                && f.message.contains("absent from the <Organisation>")),
+            "a component absent from the <Organisation> view must be a fatal \
+             Error (M1-Build cannot bind it), got: {findings:?}"
+        );
+    }
+
     // ---- new Built-in create verbs (match M1-Build's UI serialisation) ------
 
     #[test]
