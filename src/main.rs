@@ -182,6 +182,18 @@ enum Command {
         #[arg(long, value_name = "TYPE")]
         r#type: String,
     },
+    /// Change an existing BuiltIn.Constant's literal value (the M1-Build
+    /// *Value* row, `<Props Value>`) — edits it in place, preserving the rest
+    /// of the element (security, tags, comment), unlike delete-and-recreate.
+    SetValue {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        component: String,
+        /// The new literal value (e.g. `CAN Bus 2`).
+        #[arg(long)]
+        value: String,
+    },
     /// Set a component's display unit.
     SetUnit {
         #[arg(long)]
@@ -333,6 +345,7 @@ impl Command {
             | Command::RenameComponent { project, .. }
             | Command::SetSecurity { project, .. }
             | Command::SetType { project, .. }
+            | Command::SetValue { project, .. }
             | Command::SetUnit { project, .. }
             | Command::SetQuantity { project, .. }
             | Command::SetComment { project, .. }
@@ -628,6 +641,9 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         SetType {
             component, r#type, ..
         } => m1_project::set_type(&xml, component, r#type)?,
+        SetValue {
+            component, value, ..
+        } => m1_project::set_value(&xml, component, value)?,
         SetUnit {
             component, unit, ..
         } => m1_project::set_unit(&xml, component, unit)?,

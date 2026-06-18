@@ -12,6 +12,7 @@
 //! Supported edits (see each `pub fn`):
 //! - [`create_channel`] — add a `BuiltIn.Channel` component under an existing group.
 //! - [`create_constant`] — add a `BuiltIn.Constant` with its literal `Value`.
+//! - [`set_value`] — change an existing `BuiltIn.Constant`'s literal `Value`.
 //! - [`create_table`] — add a `BuiltIn.Table` with 1–3 axes.
 //! - [`create_group`] — add a `BuiltIn.GroupCompound` under an existing group.
 //! - [`delete_component`] — remove a component element (and optionally its subtree).
@@ -91,7 +92,7 @@ pub use edits::{
     create_group, create_parameter, create_reference, create_scheduled_function, create_table,
     delete_component, remove_tag, rename_component, script_relpath, set_call_rate, set_comment,
     set_display_range, set_dps, set_format, set_quantity, set_security, set_type, set_unit,
-    set_validation,
+    set_validation, set_value,
 };
 pub use query::{
     ComponentEntry, ScriptComponent, available_rates, list_components, resolve_trigger,
@@ -117,6 +118,9 @@ mod tests {
      <Props Type="f32" Security="Tune"/>
     </Component>
     <Component Classname="BuiltIn.Channel" Name="Root.Engine.Plain"/>
+    <Component Classname="BuiltIn.Constant" Name="Root.Engine.Selector">
+     <Props Value="CAN Bus 1"/>
+    </Component>
     <Component Classname="BuiltIn.MethodUser" Name="Root.Engine.Update"/>
     <Component Classname="BuiltIn.MethodUser" Name="Root.Engine.Sub.Tick"/>
     <Component Classname="BuiltIn.GroupCompound" Name="Root.Events"/>
@@ -642,6 +646,53 @@ mod tests {
         assert!(matches!(
             create_constant(PRJ, "Root.Engine.Bus", "  "),
             Err(EditError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn set_value_replaces_existing_constant_value() {
+        // The corpus shape: a constant already carrying `<Props Value="CAN Bus 1"/>`.
+        // Changing it must rewrite that Value in place (not delete-and-recreate),
+        // preserving the rest of the element.
+        let out = set_value(PRJ, "Root.Engine.Selector", "CAN Bus 2").unwrap();
+        parses(&out);
+        assert!(out.contains(r#"<Props Value="CAN Bus 2"/>"#));
+        assert!(!out.contains(r#"Value="CAN Bus 1""#));
+        // It is the same component, edited in place — still a Constant by that name.
+        assert!(out.contains(r#"Classname="BuiltIn.Constant" Name="Root.Engine.Selector""#));
+        // No new validate() findings.
+        assert_eq!(validate(&out).unwrap().len(), validate(PRJ).unwrap().len());
+    }
+
+    #[test]
+    fn set_value_escapes_special_characters() {
+        let out = set_value(PRJ, "Root.Engine.Selector", "a & b < c").unwrap();
+        parses(&out);
+        assert!(out.contains(r#"Value="a &amp; b &lt; c""#));
+    }
+
+    #[test]
+    fn set_value_rejects_empty_value() {
+        assert!(matches!(
+            set_value(PRJ, "Root.Engine.Selector", "   "),
+            Err(EditError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn set_value_rejects_non_constant_component() {
+        // A Channel has no *Value* row; set_value must refuse rather than splice a
+        // stray `Value` attribute onto its <Props>.
+        let err = set_value(PRJ, "Root.Engine.Speed", "x").unwrap_err();
+        assert!(matches!(err, EditError::Invalid(_)));
+        assert!(format!("{err}").contains("BuiltIn.Constant"));
+    }
+
+    #[test]
+    fn set_value_rejects_missing_component() {
+        assert!(matches!(
+            set_value(PRJ, "Root.Engine.Ghost", "x"),
+            Err(EditError::NoSuchComponent(_))
         ));
     }
 
