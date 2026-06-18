@@ -110,7 +110,7 @@ fn value_body(
 /// (`Root.Control.Drive State.Update` → `Control.Drive State.Update.m1scr`). This is
 /// the `Filename` M1-Build stores and the file it creates/renames under `Scripts/`.
 pub fn script_relpath(name: &str) -> String {
-    let stem = name.strip_prefix("Root.").unwrap_or(name);
+    let stem = m1_workspace::strip_root(name);
     format!("{stem}.m1scr")
 }
 
