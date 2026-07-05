@@ -66,6 +66,14 @@ impl fmt::Display for Finding {
 ///    blank name is not a usable named object in M1-Build (defence-in-depth for
 ///    files written by an older build or hand-edited; the create/rename verbs
 ///    already refuse to produce one).
+/// 9. Every component reference (table Axis `Source`, `Reference` `Target`,
+///    `NameTarget`) resolves to a real component (M1-Build Error 1338).
+/// 10. No DBCRoot module (`BuiltIn.CAN.DBC`) carries the all-zero MD5 sentinel,
+///     and no two modules share an MD5 — M1-Build refuses to open the project in
+///     either case (#82).
+/// 11. No DBCRoot module name (`DBC.<name>`) collides with a `Root.CAN.<name>` /
+///     `Root.Control.<name>` project object — a Warning, since the exact scope of
+///     the clash is not fully known (#83).
 pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
     let doc = parse_xml(xml)?;
     let mut findings: Vec<Finding> = Vec::new();
@@ -92,6 +100,12 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
     // (owner, attr, value) for the reference-resolution check (Check 9).
     let mut references: Vec<(String, &'static str, String)> = Vec::new();
     let mut org_roots: Vec<roxmltree::Node> = Vec::new();
+    // DBCRoot module entries (`<Component Classname="BuiltIn.CAN.DBC" MD5=…
+    // Name="DBC.<module>">`) for the DBC hash checks (Check 10) and the
+    // module/object name-collision check (Check 11). The `MD5` is an attribute on
+    // the `<Component>` element itself, not on `<Props>`. The `BuiltIn.CAN.DBCRoot`
+    // container (no MD5) is deliberately excluded.
+    let mut dbc_modules: Vec<(String, Option<String>)> = Vec::new();
 
     for n in doc.descendants() {
         if n.has_tag_name("Organisation") {
@@ -116,6 +130,12 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
         all_names.insert(nm.to_string());
         if classname == "BuiltIn.EventKernel" {
             valid_clocks.insert(nm.to_string());
+        }
+        // A `BuiltIn.CAN.DBC` component (NOT the `BuiltIn.CAN.DBCRoot` container)
+        // names an imported CAN database as `DBC.<module>` and carries the
+        // imported file's `MD5` on the element itself (Checks 10/11).
+        if classname == "BuiltIn.CAN.DBC" {
+            dbc_modules.push((nm.to_string(), n.attribute("MD5").map(str::to_string)));
         }
 
         // Check 8 (defence-in-depth for already-corrupt files): a component whose
@@ -352,6 +372,276 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
         }
     }
 
+    // Check 10: DBC module hashes (#82). M1-Build refuses to OPEN a project whose
+    // DBCRoot carries the all-zero MD5 sentinel (a module that was never imported)
+    // or the SAME MD5 on two different `BuiltIn.CAN.DBC` modules (a duplicate
+    // import). Both are hard load failures, so both are Errors. Verified
+    // false-positive-free on the real corpora — every DBC module there has a
+    // distinct, non-zero MD5.
+    {
+        const ZERO_MD5: &str = "00000000000000000000000000000000";
+        let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (name, md5) in &dbc_modules {
+            let Some(md5) = md5 else { continue };
+            if md5.eq_ignore_ascii_case(ZERO_MD5) {
+                findings.push(Finding {
+                    level: FindingLevel::Error,
+                    path: name.clone(),
+                    message:
+                        "DBC module has the all-zero MD5 sentinel — the CAN database was never imported; M1-Build cannot open the project"
+                            .into(),
+                    code: None,
+                });
+                continue;
+            }
+            if let Some(prev) = seen.insert(md5.to_ascii_lowercase(), name.clone()) {
+                findings.push(Finding {
+                    level: FindingLevel::Error,
+                    path: name.clone(),
+                    message: format!(
+                        "duplicate DBC module hash: MD5 `{md5}` is already used by `{prev}` — M1-Build cannot open a project with two identical CAN-database imports"
+                    ),
+                    code: None,
+                });
+            }
+        }
+    }
+
+    // Check 11: a DBC module name that collides with a project object (#83).
+    // M1-Build has been observed to fail to open a project when a DBCRoot module
+    // `DBC.<name>` shares its leaf `<name>` with a direct child of `Root.CAN` or
+    // `Root.Control` (e.g. `DBC.PDM` vs `Root.CAN.PDM`). The exact scope is not
+    // fully known — a DEEPER object such as `Root.Control.AV.DFMM` coexists with
+    // `DBC.DFMM` and loads fine — so this is a WARNING, gated to the two clearest
+    // collision sites to stay false-positive-free on the real corpora (which load
+    // in M1-Build today).
+    for (name, _) in &dbc_modules {
+        let Some(leaf) = name.strip_prefix("DBC.") else {
+            continue;
+        };
+        for parent in ["Root.CAN", "Root.Control"] {
+            let candidate = format!("{parent}.{leaf}");
+            if all_names.contains(&candidate) {
+                findings.push(Finding {
+                    level: FindingLevel::Warning,
+                    path: name.clone(),
+                    message: format!(
+                        "DBC module name `{leaf}` collides with the project object `{candidate}` — M1-Build may fail to open the project (a CAN-database name and an object name must not clash)"
+                    ),
+                    code: None,
+                });
+            }
+        }
+    }
+
+    findings.sort_by(|a, b| a.path.cmp(&b.path).then(a.message.cmp(&b.message)));
+    Ok(findings)
+}
+
+/// A DBCRoot module entry: the `BuiltIn.CAN.DBC` component `Name` (`DBC.<module>`),
+/// its `<module>` leaf (the `dbc/<module>.m1dbc` file stem it maps to), and the
+/// imported CAN database `MD5` (an attribute on the `<Component>` element). The
+/// `BuiltIn.CAN.DBCRoot` container itself is excluded.
+#[derive(Debug, Clone)]
+pub struct DbcModule {
+    /// Fully-qualified component name, e.g. `DBC.M150`.
+    pub name: String,
+    /// The module leaf, e.g. `M150`.
+    pub module: String,
+    /// The imported CAN database MD5, if the element carries one.
+    pub md5: Option<String>,
+}
+
+/// Enumerate the project's DBCRoot module entries (the `BuiltIn.CAN.DBC`
+/// components). Each maps to a `dbc/<module>.m1dbc` file; the CLI's file-aware DBC
+/// check ([`validate_dbc_file`]) reads and cross-checks those (#84).
+pub fn dbc_modules(xml: &str) -> Result<Vec<DbcModule>, EditError> {
+    let doc = parse_xml(xml)?;
+    let mut out = Vec::new();
+    for n in doc.descendants().filter(is_real_component) {
+        if n.attribute("Classname") != Some("BuiltIn.CAN.DBC") {
+            continue;
+        }
+        let Some(name) = n.attribute("Name") else {
+            continue;
+        };
+        let module = name.strip_prefix("DBC.").unwrap_or(name).to_string();
+        out.push(DbcModule {
+            name: name.to_string(),
+            module,
+            md5: n.attribute("MD5").map(str::to_string),
+        });
+    }
+    Ok(out)
+}
+
+/// File-aware internal-consistency checks for one `.m1dbc` CAN-database file (#84).
+///
+/// Pure (`&str` in, findings out) so it is unit-testable; the CLI does the I/O and
+/// supplies `dbc_component` (the DBCRoot entry `Name`, used as the finding path),
+/// the `module` leaf and `expected_md5` from the DBCRoot entry, and the actual
+/// filename `stem`. Checks:
+///   - the file has an internal `BuiltIn.CAN.DBC` component;
+///   - its `Name` matches the DBCRoot module and the filename stem;
+///   - its `MD5` matches the DBCRoot entry (an out-of-sync re-import otherwise);
+///   - the file's own `<List>`/`<Organisation>` views agree (the real AV-M1
+///     `Dash.DashVals1` bug: an org node with no matching List component makes
+///     M1-Build fail with "Unable to find Properties for object").
+pub fn validate_dbc_file(
+    dbc_xml: &str,
+    dbc_component: &str,
+    module: &str,
+    expected_md5: Option<&str>,
+    stem: &str,
+) -> Result<Vec<Finding>, EditError> {
+    let doc = parse_xml(dbc_xml)?;
+    let mut findings = Vec::new();
+
+    let inner = doc
+        .descendants()
+        .find(|n| is_real_component(n) && n.attribute("Classname") == Some("BuiltIn.CAN.DBC"));
+    match inner {
+        None => findings.push(Finding {
+            level: FindingLevel::Error,
+            path: dbc_component.to_string(),
+            message: format!(
+                "`{stem}.m1dbc` has no internal BuiltIn.CAN.DBC component — it is not a valid CAN database file"
+            ),
+            code: None,
+        }),
+        Some(inner) => {
+            let inner_name = inner.attribute("Name").unwrap_or("");
+            if inner_name != module {
+                findings.push(Finding {
+                    level: FindingLevel::Error,
+                    path: dbc_component.to_string(),
+                    message: format!(
+                        "`{stem}.m1dbc` internal module name `{inner_name}` does not match the DBCRoot module `{module}`"
+                    ),
+                    code: None,
+                });
+            } else if inner_name != stem {
+                // Only when it matched the DBCRoot module but not the filename
+                // (the two are normally the same string) — a renamed file.
+                findings.push(Finding {
+                    level: FindingLevel::Error,
+                    path: dbc_component.to_string(),
+                    message: format!(
+                        "`{stem}.m1dbc` internal module name `{inner_name}` does not match its filename stem `{stem}`"
+                    ),
+                    code: None,
+                });
+            }
+            if let Some(expected) = expected_md5 {
+                let inner_md5 = inner.attribute("MD5").unwrap_or("");
+                if !inner_md5.eq_ignore_ascii_case(expected) {
+                    findings.push(Finding {
+                        level: FindingLevel::Error,
+                        path: dbc_component.to_string(),
+                        message: format!(
+                            "`{stem}.m1dbc` internal MD5 `{inner_md5}` does not match the DBCRoot MD5 `{expected}` — the imported database is out of sync"
+                        ),
+                        code: None,
+                    });
+                }
+            }
+        }
+    }
+
+    findings.extend(dbc_org_list_consistency(&doc, dbc_component, stem));
+    findings.sort_by(|a, b| a.path.cmp(&b.path).then(a.message.cmp(&b.message)));
+    Ok(findings)
+}
+
+/// `<List>`/`<Organisation>` consistency within a single `.m1dbc` document — the
+/// same binding rule as the project's Check 4, applied to the CAN-database file.
+/// Both halves are fatal to M1-Build (it cannot bind an object's Properties).
+fn dbc_org_list_consistency(
+    doc: &roxmltree::Document<'_>,
+    path_prefix: &str,
+    stem: &str,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let all_names: std::collections::HashSet<String> = doc
+        .descendants()
+        .filter(is_real_component)
+        .filter_map(|n| n.attribute("Name"))
+        .map(str::to_string)
+        .collect();
+    let mut org_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for org in doc.descendants().filter(|n| n.has_tag_name("Organisation")) {
+        collect_org_paths(org, "", &mut org_paths);
+    }
+    if org_paths.is_empty() {
+        return findings;
+    }
+    for p in &org_paths {
+        if !all_names.contains(p) {
+            findings.push(Finding {
+                level: FindingLevel::Error,
+                path: path_prefix.to_string(),
+                message: format!(
+                    "`{stem}.m1dbc`: <Organisation> node `{p}` has no matching <List> component — M1-Build cannot find its Properties"
+                ),
+                code: Some(1338),
+            });
+        }
+    }
+    for nm in &all_names {
+        if !org_paths.contains(nm) {
+            findings.push(Finding {
+                level: FindingLevel::Error,
+                path: path_prefix.to_string(),
+                message: format!(
+                    "`{stem}.m1dbc`: <List> component `{nm}` is absent from the <Organisation> view — M1-Build cannot bind its Properties"
+                ),
+                code: Some(1338),
+            });
+        }
+    }
+    findings
+}
+
+/// Opt-in heuristic for M1-Build's mandatory-tag warning 1142 ("a mandatory Type
+/// tag group is not selected"). OFF by default — enabled only via
+/// `validate --check-mandatory-tags` — because the real projects carry hundreds of
+/// legitimately-untagged objects and the full tag-GROUP model (which groups are
+/// mandatory, which tags belong to them) is NOT encoded in the `.m1prj`, so it
+/// cannot be derived offline. The clearest safe sub-case is flagged: a
+/// value-bearing Channel/Parameter/Table that carries NO user tag at all (so no
+/// tag from any group, mandatory or not, is selected). Emitted as WARNINGs, which
+/// never change the exit code / fail CI.
+pub fn mandatory_tag_findings(xml: &str) -> Result<Vec<Finding>, EditError> {
+    let doc = parse_xml(xml)?;
+    let mut findings = Vec::new();
+    for n in doc.descendants().filter(is_real_component) {
+        let classname = n.attribute("Classname").unwrap_or("");
+        if !matches!(
+            classname,
+            "BuiltIn.Channel" | "BuiltIn.Parameter" | "BuiltIn.Table" | "BuiltIn.CalibrationTable"
+        ) {
+            continue;
+        }
+        let Some(nm) = n.attribute("Name") else {
+            continue;
+        };
+        let has_tag = n
+            .children()
+            .find(|c| c.has_tag_name("Props"))
+            .and_then(|p| p.children().find(|c| c.has_tag_name("List.UserTags")))
+            .map(|t| t.children().any(|e| e.has_tag_name("Entry")))
+            .unwrap_or(false);
+        if !has_tag {
+            findings.push(Finding {
+                level: FindingLevel::Warning,
+                path: nm.to_string(),
+                message:
+                    "no user tag selected — M1-Build warns when a mandatory tag group (e.g. Type) has no tag (Build 1142)"
+                        .into(),
+                code: Some(1142),
+            });
+        }
+    }
     findings.sort_by(|a, b| a.path.cmp(&b.path).then(a.message.cmp(&b.message)));
     Ok(findings)
 }

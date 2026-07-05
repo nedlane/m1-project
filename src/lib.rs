@@ -98,7 +98,10 @@ pub use query::{
     ComponentEntry, ScriptComponent, available_rates, list_components, resolve_trigger,
     script_components, security_groups,
 };
-pub use validate::{Finding, FindingLevel, validate};
+pub use validate::{
+    DbcModule, Finding, FindingLevel, dbc_modules, mandatory_tag_findings, validate,
+    validate_dbc_file,
+};
 
 #[cfg(test)]
 pub(crate) use edits::{build_trigger, format_motec_float, validate_type};
@@ -1957,5 +1960,241 @@ mod tests {
             ),
             "set_type with \"::\" must return EditError::Invalid"
         );
+    }
+
+    // ---- DBC validation (#82/#83/#84/#85) --------------------------------
+
+    // A minimal DBCRoot with two distinct, non-zero module hashes and no
+    // <Organisation> (so Check 4 is skipped) — validates clean.
+    const DBC_PRJ: &str = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession>
+ <Project Name="T">
+  <ComponentStream>
+   <List>
+    <Component Classname="BuiltIn.CAN.DBCRoot" Name="DBC"/>
+    <Component Classname="BuiltIn.CAN.DBC" MD5="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" Name="DBC.M150"/>
+    <Component Classname="BuiltIn.CAN.DBC" MD5="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" Name="DBC.BMU"/>
+   </List>
+  </ComponentStream>
+ </Project>
+</MoTeCM1BuildSession>
+"#;
+
+    #[test]
+    fn validate_clean_dbc_root_has_no_findings() {
+        assert!(validate(DBC_PRJ).unwrap().is_empty());
+    }
+
+    #[test]
+    fn validate_flags_zero_md5_sentinel() {
+        let prj = DBC_PRJ.replace(
+            "MD5=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "MD5=\"00000000000000000000000000000000\"",
+        );
+        let findings = validate(&prj).unwrap();
+        assert!(
+            findings.iter().any(|f| f.path == "DBC.M150"
+                && f.level == FindingLevel::Error
+                && f.message.contains("all-zero MD5")),
+            "zero-MD5 module must be an Error: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_flags_duplicate_module_md5() {
+        // Give BMU the same hash as M150.
+        let prj = DBC_PRJ.replace(
+            "MD5=\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"",
+            "MD5=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+        );
+        let findings = validate(&prj).unwrap();
+        assert!(
+            findings.iter().any(|f| f.level == FindingLevel::Error
+                && f.message.contains("duplicate DBC module hash")),
+            "duplicate MD5 must be an Error: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_warns_dbc_name_collides_with_root_can_child() {
+        // Inject a Root.CAN.M150 object — a direct child of Root.CAN sharing the
+        // module leaf `M150`.
+        let prj = DBC_PRJ.replace(
+            "<Component Classname=\"BuiltIn.CAN.DBCRoot\" Name=\"DBC\"/>",
+            "<Component Classname=\"BuiltIn.CAN.DBCRoot\" Name=\"DBC\"/>\n    \
+             <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root.CAN.M150\"/>",
+        );
+        let findings = validate(&prj).unwrap();
+        assert!(
+            findings.iter().any(|f| f.level == FindingLevel::Warning
+                && f.message
+                    .contains("collides with the project object `Root.CAN.M150`")),
+            "Root.CAN.<name> collision must warn: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_does_not_warn_on_deeper_object_collision() {
+        // A DEEPER object (Root.Control.AV.M150) is NOT a gated collision site —
+        // matches the real DFMM counter-example that loads fine. No warning.
+        let prj = DBC_PRJ.replace(
+            "<Component Classname=\"BuiltIn.CAN.DBCRoot\" Name=\"DBC\"/>",
+            "<Component Classname=\"BuiltIn.CAN.DBCRoot\" Name=\"DBC\"/>\n    \
+             <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root.Control.AV.M150\"/>",
+        );
+        let findings = validate(&prj).unwrap();
+        assert!(
+            !findings.iter().any(|f| f.message.contains("collides")),
+            "deeper object must not trigger the collision warning: {findings:?}"
+        );
+    }
+
+    // A self-consistent .m1dbc: internal DBC Name==stem, matching MD5, agreeing
+    // <List>/<Organisation>.
+    const DBC_FILE: &str = r#"<?xml version="1.0"?>
+<DBC>
+ <ComponentStream>
+  <List>
+   <Component Classname="BuiltIn.CAN.DBC" MD5="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" Name="M150"/>
+   <Component Classname="BuiltIn.CAN.Message" Name="M150.Msg"/>
+   <Component Classname="BuiltIn.CAN.Signal" Name="M150.Msg.Sig"/>
+  </List>
+  <Organisation>
+   <Component Name="M150">
+    <Component Name="Msg">
+     <Component Name="Sig"/>
+    </Component>
+   </Component>
+  </Organisation>
+ </ComponentStream>
+</DBC>
+"#;
+
+    #[test]
+    fn validate_dbc_file_accepts_consistent_file() {
+        let findings = validate_dbc_file(
+            DBC_FILE,
+            "DBC.M150",
+            "M150",
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            "M150",
+        )
+        .unwrap();
+        assert!(
+            findings.is_empty(),
+            "consistent .m1dbc must be clean: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_dbc_file_flags_name_mismatch() {
+        // DBCRoot says the module is Datalogger, the file's internal name is M150.
+        let findings =
+            validate_dbc_file(DBC_FILE, "DBC.Datalogger", "Datalogger", None, "Datalogger")
+                .unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.message.contains("does not match the DBCRoot module")),
+            "name mismatch must be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_dbc_file_flags_stem_mismatch() {
+        // Internal name matches the DBCRoot module (M150) but not the filename stem.
+        let findings = validate_dbc_file(DBC_FILE, "DBC.M150", "M150", None, "Renamed").unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.message.contains("does not match its filename stem")),
+            "stem mismatch must be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_dbc_file_flags_md5_mismatch() {
+        let findings = validate_dbc_file(
+            DBC_FILE,
+            "DBC.M150",
+            "M150",
+            Some("ffffffffffffffffffffffffffffffff"),
+            "M150",
+        )
+        .unwrap();
+        assert!(
+            findings.iter().any(|f| f.message.contains("internal MD5")),
+            "MD5 mismatch must be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_dbc_file_flags_org_without_list_component() {
+        // Add an <Organisation> node (M150.Msg.Ghost) with no matching <List>
+        // component — the real AV-M1 `Dash.DashVals1` bug.
+        let bad = DBC_FILE.replace(
+            "<Component Name=\"Sig\"/>",
+            "<Component Name=\"Sig\"/>\n     <Component Name=\"Ghost\"/>",
+        );
+        let findings = validate_dbc_file(
+            &bad,
+            "DBC.M150",
+            "M150",
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            "M150",
+        )
+        .unwrap();
+        assert!(
+            findings.iter().any(|f| f.level == FindingLevel::Error
+                && f.message.contains("M150.Msg.Ghost")
+                && f.message.contains("no matching <List> component")),
+            "org node without a List component must be an Error: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn dbc_modules_enumerates_dbc_root_entries() {
+        let mods = dbc_modules(DBC_PRJ).unwrap();
+        let names: Vec<&str> = mods.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["DBC.M150", "DBC.BMU"]);
+        assert_eq!(mods[0].module, "M150");
+        assert_eq!(
+            mods[0].md5.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn mandatory_tag_findings_flags_untagged_value_object_only() {
+        let prj = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession>
+ <Project Name="T">
+  <ComponentStream>
+   <List>
+    <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+    <Component Classname="BuiltIn.Channel" Name="Root.Untagged"><Props Type="f32"/></Component>
+    <Component Classname="BuiltIn.Channel" Name="Root.Tagged"><Props Type="f32"><List.UserTags><Entry Value="Input"/></List.UserTags></Props></Component>
+   </List>
+  </ComponentStream>
+ </Project>
+</MoTeCM1BuildSession>
+"#;
+        let findings = mandatory_tag_findings(prj).unwrap();
+        // Every finding is a Warning with code 1142.
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.level == FindingLevel::Warning && f.code == Some(1142))
+        );
+        assert!(
+            findings.iter().any(|f| f.path == "Root.Untagged"),
+            "untagged channel must be flagged: {findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|f| f.path == "Root.Tagged"),
+            "tagged channel must NOT be flagged: {findings:?}"
+        );
+        // The GroupCompound is not a value object — not flagged.
+        assert!(!findings.iter().any(|f| f.path == "Root"));
     }
 }

@@ -315,6 +315,13 @@ enum Command {
         /// Emit JSON (array of objects with level/path/message) instead of text.
         #[arg(long)]
         json: bool,
+        /// Also run the opt-in mandatory-tag heuristic (M1-Build warning 1142):
+        /// flag value-bearing objects (Channel/Parameter/Table) that carry no user
+        /// tag. OFF by default — real projects carry hundreds of legitimately
+        /// untagged objects — and it only ever emits warnings, so it never changes
+        /// the exit code.
+        #[arg(long)]
+        check_mandatory_tags: bool,
     },
     /// List all components in the project.
     ListComponents {
@@ -408,14 +415,25 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
             return Ok(ExitCode::SUCCESS);
         }
-        Validate { project, json } => {
+        Validate {
+            project,
+            json,
+            check_mandatory_tags,
+        } => {
             let (xml, _enc) = m1_workspace::read_text_with_encoding(project)
                 .map_err(|e| format!("{}: {e}", project.display()))?;
             let mut findings = m1_project::validate(&xml)?;
-            // File-aware check (only the CLI does I/O): a script component whose
-            // backing `.m1scr` is missing or empty is M1-Build's "Missing code"
-            // error. `validate()` itself stays pure (`&str` → findings).
+            // File-aware checks (only the CLI does I/O; `validate()` stays pure):
+            //   - a script component whose backing `.m1scr` is missing/empty is
+            //     M1-Build's "Missing code" error;
+            //   - each DBCRoot module's backing `dbc/<module>.m1dbc` must exist and
+            //     be internally consistent with the DBCRoot entry (#84).
             findings.extend(missing_code_findings(project, &xml));
+            findings.extend(dbc_findings(project, &xml));
+            // Opt-in mandatory-tag heuristic (#85) — warnings only, off by default.
+            if *check_mandatory_tags {
+                findings.extend(m1_project::mandatory_tag_findings(&xml).unwrap_or_default());
+            }
             findings.sort_by(|a, b| a.path.cmp(&b.path).then(a.message.cmp(&b.message)));
             let errors = findings
                 .iter()
@@ -746,6 +764,52 @@ fn scripts_dir(project: &Path) -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("Scripts")
+}
+
+/// File-aware DBC checks (#84): for every DBCRoot module, the backing
+/// `dbc/<module>.m1dbc` must exist and its internal `BuiltIn.CAN.DBC` Name/MD5 and
+/// `<List>`/`<Organisation>` view must be self-consistent. Like `missing_code`,
+/// only the CLI does this I/O; `validate()` stays pure. Files are read tolerantly
+/// (Windows-1252 fallback) as AGENTS.md requires for MoTeC files.
+fn dbc_findings(project: &Path, xml: &str) -> Vec<m1_project::Finding> {
+    let Ok(modules) = m1_project::dbc_modules(xml) else {
+        return Vec::new();
+    };
+    let dir = project
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("dbc");
+    let mut out = Vec::new();
+    for m in modules {
+        let path = dir.join(format!("{}.m1dbc", m.module));
+        let Ok(body) = m1_workspace::read_text(&path) else {
+            out.push(m1_project::Finding {
+                level: m1_project::FindingLevel::Error,
+                path: m.name.clone(),
+                message: format!(
+                    "DBC module file `dbc/{}.m1dbc` is missing or unreadable — M1-Build cannot load the CAN database",
+                    m.module
+                ),
+                code: None,
+            });
+            continue;
+        };
+        // The file is discovered by the module name, so its stem IS the module.
+        match m1_project::validate_dbc_file(&body, &m.name, &m.module, m.md5.as_deref(), &m.module)
+        {
+            Ok(fs) => out.extend(fs),
+            Err(_) => out.push(m1_project::Finding {
+                level: m1_project::FindingLevel::Error,
+                path: m.name.clone(),
+                message: format!(
+                    "DBC module file `dbc/{}.m1dbc` is not well-formed XML",
+                    m.module
+                ),
+                code: None,
+            }),
+        }
+    }
+    out
 }
 
 /// Create the empty backing `.m1scr` for a newly-created script component, as
