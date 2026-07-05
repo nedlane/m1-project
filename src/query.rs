@@ -170,6 +170,83 @@ pub fn resolve_trigger(owner: &str, trigger: &str) -> Option<String> {
     }
 }
 
+/// The `<Props>` attributes that carry a component *reference* — a table axis
+/// `Source`, a `BuiltIn.Reference` `Target`, and a `NameTarget`. Each is a
+/// `This.`/`Parent.`-anchored (or absolute) path to another component.
+pub const REFERENCE_ATTRS: [&str; 3] = ["Source", "Target", "NameTarget"];
+
+/// Resolve a `This.`/`Parent.`-anchored (or absolute) reference to its absolute
+/// path, given the referring component's own `Name`. `This` denotes the
+/// referrer's enclosing group (manual p.41), each `Parent` climbs one further
+/// group; an already-absolute `Root.…` value is returned as-is. Mirrors the
+/// authoritative resolver in m1-typecheck.
+///
+/// The resolved path may end in an *implicit accessor* child (`.Value`,
+/// `.Resource`, …) that is not itself a listed component; callers therefore
+/// treat a reference as resolving when the path OR any of its prefixes is a real
+/// component (see [`reference_resolves`]).
+pub fn resolve_reference(referrer: &str, value: &str) -> Option<String> {
+    let group = referrer
+        .rsplit_once('.')
+        .map(|(g, _)| g)
+        .unwrap_or(referrer);
+    if value == "This" {
+        return Some(group.to_string());
+    }
+    if let Some(rest) = value.strip_prefix("This.") {
+        return Some(format!("{group}.{rest}"));
+    }
+    if value.starts_with("Parent") {
+        let mut rest = value;
+        let mut levels = 0usize;
+        loop {
+            if rest == "Parent" {
+                levels += 1;
+                rest = "";
+                break;
+            }
+            match rest.strip_prefix("Parent.") {
+                Some(r) => {
+                    rest = r;
+                    levels += 1;
+                }
+                None => break,
+            }
+        }
+        let mut base = group.to_string();
+        for _ in 0..levels {
+            let i = base.rfind('.')?;
+            base.truncate(i);
+        }
+        return Some(if rest.is_empty() {
+            base
+        } else if base.is_empty() {
+            rest.to_string()
+        } else {
+            format!("{base}.{rest}")
+        });
+    }
+    Some(value.to_string()) // absolute (`Root.…`)
+}
+
+/// Whether an absolute reference path lands on a real component — itself, or an
+/// implicit accessor child of one (so `Root.Foo.Value` resolves when `Root.Foo`
+/// is a component). `pred` reports whether a candidate path is a known
+/// component; the check walks the path and its ancestors.
+pub fn reference_resolves(abs: &str, is_component: impl Fn(&str) -> bool) -> bool {
+    if is_component(abs) {
+        return true;
+    }
+    let mut p = abs;
+    while let Some((head, _)) = p.rsplit_once('.') {
+        if is_component(head) {
+            return true;
+        }
+        p = head;
+    }
+    false
+}
+
 /// The `On <…>` clock leaves available under `Root.Events` (for an editor picker).
 pub fn available_rates(xml: &str) -> Result<Vec<String>, EditError> {
     let doc = parse_xml(xml)?;

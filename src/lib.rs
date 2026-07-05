@@ -132,6 +132,76 @@ mod tests {
 </MoTeCM1BuildSession>
 "#;
 
+    /// A project with a cross-boundary reference: a `BuiltIn.Reference` under
+    /// `Root.Maps` whose `Target` points (via `Parent.`) at `Root.Engine.Speed`.
+    const PRJ_WITH_REF: &str = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession>
+ <Project Name="T">
+  <ComponentStream>
+   <List>
+    <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+    <Component Classname="BuiltIn.GroupCompound" Name="Root.Engine"/>
+    <Component Classname="BuiltIn.Channel" Name="Root.Engine.Speed"><Props Type="f32"/></Component>
+    <Component Classname="BuiltIn.GroupCompound" Name="Root.Maps"/>
+    <Component Classname="BuiltIn.Reference" Name="Root.Maps.Ref"><Props Target="Parent.Engine.Speed"/></Component>
+   </List>
+  </ComponentStream>
+ </Project>
+</MoTeCM1BuildSession>
+"#;
+
+    #[test]
+    fn rename_rewrites_a_cross_boundary_reference() {
+        // Renaming the target of a cross-boundary reference rewrites the
+        // reference's tail, and the result validates clean.
+        let (out, _) = rename_component(PRJ_WITH_REF, "Root.Engine.Speed", "Velocity").unwrap();
+        assert!(
+            out.contains(r#"Target="Parent.Engine.Velocity""#),
+            "reference tail should follow the rename:\n{out}"
+        );
+        let findings = validate(&out).unwrap();
+        assert!(
+            !findings.iter().any(|f| f.message.contains("dangling")),
+            "renamed project must validate clean: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn delete_blocks_a_cross_boundary_reference() {
+        // Deleting the target of a cross-boundary reference is blocked (the
+        // orphan guard now covers Target/Source/NameTarget, not just triggers).
+        let err = delete_component(PRJ_WITH_REF, "Root.Engine.Speed", false, false).unwrap_err();
+        assert!(
+            matches!(err, EditError::Invalid(_)),
+            "expected Invalid: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("Target"),
+            "block reason should name the reference: {err}"
+        );
+        // --force overrides the guard (produces a technically-invalid project).
+        assert!(delete_component(PRJ_WITH_REF, "Root.Engine.Speed", false, true).is_ok());
+    }
+
+    #[test]
+    fn validate_flags_a_reference_with_no_component_root() {
+        // A reference whose resolved target has no real component in its path at
+        // all is dangling. (A tail under a *surviving* component — e.g. an
+        // implicit `.Value`/`.Resource` accessor, or a deleted leaf whose group
+        // remains — is conservatively accepted to stay false-positive-free on the
+        // real corpora; the rename-rewrite and delete-guard, which know the exact
+        // changed set, are what actually prevent creating such a dangle.)
+        let xml = PRJ_WITH_REF.replace(
+            r#"Target="Parent.Engine.Speed""#,
+            r#"Target="Nowhere.Gone""#,
+        );
+        let findings = validate(&xml).unwrap();
+        assert!(
+            findings.iter().any(|f| f.message.contains("dangling")),
+            "expected a dangling-reference finding: {findings:?}"
+        );
+    }
+
     fn parses(xml: &str) {
         roxmltree::Document::parse(xml).expect("result must be valid XML");
     }
