@@ -454,7 +454,14 @@ pub(crate) fn org_insert_child(
             .rfind("</Component>")
             .ok_or_else(|| EditError::Invalid("malformed Organisation node".into()))?;
         let abs_close = parent_range.start + close_rel;
-        let line_start = xml[..abs_close].rfind('\n').unwrap_or(abs_close);
+        // Back up to the start of the closing tag's line, but never past the
+        // start of the parent element: an unbounded search escaped the element
+        // on a single-line layout (`<Component …>…</Component>` with no interior
+        // newline), splicing the new child OUTSIDE the parent's view subtree.
+        let line_start = xml[parent_range.start..abs_close]
+            .rfind('\n')
+            .map(|i| parent_range.start + i)
+            .unwrap_or(abs_close);
         Ok(Some(splice(xml, line_start..line_start, &child)))
     }
 }

@@ -89,6 +89,8 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
     // (owner, trigger) pairs for check 3 — resolution needs `valid_clocks`
     // complete, so it runs after the pass.
     let mut triggered: Vec<(String, String)> = Vec::new();
+    // (owner, attr, value) for the reference-resolution check (Check 9).
+    let mut references: Vec<(String, &'static str, String)> = Vec::new();
     let mut org_roots: Vec<roxmltree::Node> = Vec::new();
 
     for n in doc.descendants() {
@@ -137,6 +139,15 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
             .push(nm.to_string());
         if let Some(t) = trigger {
             triggered.push((nm.to_string(), t.to_string()));
+        }
+        // Component references (table Axis Source, Reference Target, NameTarget)
+        // for Check 9.
+        if let Some(p) = props {
+            for attr in crate::query::REFERENCE_ATTRS {
+                if let Some(v) = p.attribute(attr) {
+                    references.push((nm.to_string(), attr, v.to_string()));
+                }
+            }
         }
 
         // Check 5: a scheduled function (BuiltIn.FuncUser) with no event/trigger.
@@ -260,6 +271,41 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                         path: owner.to_string(),
                         message: format!(
                             "SelectedTrigger `{trigger}` resolves to `{abs}` which is not a BuiltIn.EventKernel clock"
+                        ),
+                        code: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // Check 9: component references resolve. A table Axis `Source`, a
+    // `BuiltIn.Reference` `Target`, or a `NameTarget` that points at a component
+    // (or its implicit `.Value`/`.Resource` child) which does not exist is a
+    // dangling reference — M1-Build's "Object does not exist" (error 1338).
+    // rename/delete used to leave these dangling and validate never caught it,
+    // so the toolchain could both create and certify a broken project. Verified
+    // false-positive-free on the real corpora (every EV-M1/AV-M1 reference
+    // resolves). A `$(…)` template is dynamic and skipped.
+    for (owner, attr, value) in &references {
+        if value.starts_with("$(") {
+            continue;
+        }
+        match crate::query::resolve_reference(owner, value) {
+            None => findings.push(Finding {
+                level: FindingLevel::Error,
+                path: owner.clone(),
+                message: format!("cannot resolve {attr} `{value}` (malformed relative path)"),
+                code: None,
+            }),
+            Some(abs) => {
+                if !crate::query::reference_resolves(&abs, |p| all_names.contains(p)) {
+                    findings.push(Finding {
+                        level: FindingLevel::Error,
+                        path: owner.clone(),
+                        message: format!(
+                            "{attr} `{value}` resolves to `{abs}`, which is not a component \
+                             (dangling reference — M1-Build Error 1338)"
                         ),
                         code: None,
                     });

@@ -429,15 +429,46 @@ pub fn delete_component(
             if let Some(abs) = resolve_trigger(owner, trigger)
                 && deleted_clocks.contains(&abs)
             {
-                referencing.push(owner.to_string());
+                referencing.push(format!("{owner} (SelectedTrigger)"));
+            }
+        }
+    }
+
+    // A table Axis Source / Reference Target / NameTarget that resolves into the
+    // deleted subtree would also dangle (M1-Build Error 1338) — the orphan guard
+    // used to check only SelectedTrigger, so deleting a channel used as a table
+    // axis succeeded silently and produced an invalid project.
+    for n in doc
+        .descendants()
+        .filter(is_real_component)
+        .filter(|n| n.attribute("Name").map(|nm| !deleted_names.contains(nm)) == Some(true))
+    {
+        let Some(owner) = n.attribute("Name") else {
+            continue;
+        };
+        let Some(props) = n.children().find(|c| c.has_tag_name("Props")) else {
+            continue;
+        };
+        for attr in crate::query::REFERENCE_ATTRS {
+            let Some(v) = props.attribute(attr) else {
+                continue;
+            };
+            if v.starts_with("$(") {
+                continue;
+            }
+            if let Some(abs) = crate::query::resolve_reference(owner, v)
+                && crate::query::reference_resolves(&abs, |p| deleted_names.contains(p))
+            {
+                referencing.push(format!("{owner} ({attr})"));
             }
         }
     }
 
     if !referencing.is_empty() && !force {
         referencing.sort();
+        referencing.dedup();
         return Err(EditError::Invalid(format!(
-            "cannot delete `{name}`: referenced by SelectedTrigger in: {}; pass --force to delete anyway",
+            "cannot delete `{name}`: referenced by: {}; pass --force to delete anyway",
             referencing.join(", ")
         )));
     }
@@ -485,6 +516,28 @@ pub fn delete_component(
 /// `<Organisation>` view node and the `Filename` of every renamed script
 /// component, and returns the rewritten XML plus the backing `.m1scr` files the
 /// caller should rename on disk (old → new), matching M1-Build's UI rename.
+/// Split a `This.`/`Parent.`-anchored reference value into its anchor prefix and
+/// the target tail (`"Parent.Parent.Speed"` -> `("Parent.Parent.", "Speed")`,
+/// `"This.Value"` -> `("This.", "Value")`, an absolute `"Root.X"` -> `("", "Root.X")`).
+fn split_anchor(value: &str) -> (&str, &str) {
+    if let Some(rest) = value.strip_prefix("This.") {
+        return ("This.", rest);
+    }
+    if value.starts_with("Parent") {
+        let mut i = 0;
+        let mut rest = value;
+        while let Some(r) = rest.strip_prefix("Parent.") {
+            i = value.len() - r.len();
+            rest = r;
+        }
+        if rest == "Parent" {
+            return (value, "");
+        }
+        return (&value[..i], rest);
+    }
+    ("", value)
+}
+
 pub fn rename_component(
     xml: &str,
     old_name: &str,
@@ -638,6 +691,69 @@ pub fn rename_component(
             trigger_fixes.push((trigger_attr.range_value(), xml_escape(&new_trigger)));
         }
         result = apply_splices_desc(result, trigger_fixes);
+    }
+
+    // Pass 2b: rewrite table Axis `Source` / Reference `Target` / `NameTarget`
+    // references that point INTO the renamed subtree from OUTSIDE it. A relative
+    // reference wholly within the renamed subtree auto-follows the rename (both
+    // referrer and target move together), so only a cross-boundary reference
+    // needs updating — and its anchor base (the un-renamed referrer's group) is
+    // then unchanged, so only the target tail changes. Without this, renaming a
+    // channel used as a table axis or reference target left a dangling reference
+    // (M1-Build Error 1338) that Check 9 now also catches.
+    {
+        let doc = parse_xml(&result)?;
+        let mut ref_fixes: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+        for n in doc.descendants().filter(is_real_component) {
+            let Some(owner_new) = n.attribute("Name") else {
+                continue;
+            };
+            let owner_old = to_rename
+                .iter()
+                .find(|(_, new)| new == owner_new)
+                .map(|(old, _)| old.as_str())
+                .unwrap_or(owner_new);
+            // A referrer inside the renamed subtree keeps its relative reference.
+            if owner_old == old_name || owner_old.starts_with(&old_prefix) {
+                continue;
+            }
+            let Some(props) = n.children().find(|c| c.has_tag_name("Props")) else {
+                continue;
+            };
+            for attr in crate::query::REFERENCE_ATTRS {
+                let Some(ra) = props.attribute_node(attr) else {
+                    continue;
+                };
+                let value = props.attribute(attr).unwrap();
+                if value.starts_with("$(") {
+                    continue;
+                }
+                let Some(abs) = crate::query::resolve_reference(owner_old, value) else {
+                    continue;
+                };
+                let new_abs = if abs == old_name {
+                    new_name.clone()
+                } else if let Some(rest) = abs.strip_prefix(&old_prefix) {
+                    format!("{new_name}.{rest}")
+                } else {
+                    continue; // target not in the renamed subtree
+                };
+                // Keep the anchor; recompute the tail below the (unchanged) base.
+                let (anchor, tail) = split_anchor(value);
+                let new_value = if anchor.is_empty() {
+                    new_abs.clone() // absolute reference
+                } else {
+                    let base = abs.strip_suffix(tail).unwrap_or("").trim_end_matches('.');
+                    let new_tail = new_abs
+                        .strip_prefix(base)
+                        .unwrap_or(&new_abs)
+                        .trim_start_matches('.');
+                    format!("{anchor}{new_tail}")
+                };
+                ref_fixes.push((ra.range_value(), xml_escape(&new_value)));
+            }
+        }
+        result = apply_splices_desc(result, ref_fixes);
     }
 
     // Pass 3: update the `Filename` of every renamed script component to its new

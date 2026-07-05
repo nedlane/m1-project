@@ -723,7 +723,10 @@ fn missing_code_findings(project: &Path, xml: &str) -> Vec<m1_project::Finding> 
     for s in scripts {
         // Only a file that EXISTS and is empty/whitespace counts; a missing file
         // means the component inherits its code and is legitimately script-less.
-        if let Ok(body) = std::fs::read_to_string(dir.join(&s.filename))
+        // Read tolerantly (Windows-1252 fallback) — a raw UTF-8 read of a `.m1scr`
+        // carrying a `°` byte would error and silently skip the check, which
+        // AGENTS.md forbids for MoTeC files.
+        if let Ok(body) = m1_workspace::read_text(&dir.join(&s.filename))
             && body.trim().is_empty()
         {
             out.push(m1_project::Finding {
