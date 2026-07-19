@@ -779,6 +779,103 @@ fn rename_rolls_back_files_when_a_rename_fails() {
 }
 
 #[test]
+fn rename_refuses_existing_destination_file() {
+    // An unrelated (orphan) .m1scr already sits at a rename destination. On
+    // platforms where fs::rename replaces the destination, proceeding would
+    // silently destroy its bytes before the XML write — unrecoverable by
+    // rollback. The whole rename must be refused up front: destination bytes,
+    // source files, and the XML all stay untouched.
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let dir = tmp_path("rename_dest_exists");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("Scripts")).unwrap();
+    let path = dir.join("Project.m1prj");
+    let xml = minimal_project();
+    std::fs::write(&path, xml).unwrap();
+    std::fs::write(dir.join("Scripts/Engine.Update.m1scr"), "/* source */\n").unwrap();
+    // The orphan occupying the destination path.
+    std::fs::write(dir.join("Scripts/Motor.Update.m1scr"), "/* precious */\n").unwrap();
+
+    let out = Command::new(bin)
+        .args([
+            "rename-component",
+            "--name",
+            "Root.Engine",
+            "--new-name",
+            "Motor",
+            "--project",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "rename must refuse an existing destination: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("Motor.Update.m1scr"),
+        "error must name the occupied destination, got: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("Scripts/Motor.Update.m1scr")).unwrap(),
+        "/* precious */\n",
+        "existing destination must remain byte-for-byte unchanged"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("Scripts/Engine.Update.m1scr")).unwrap(),
+        "/* source */\n",
+        "source must remain in place"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        xml,
+        "XML must be untouched"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn create_function_leaves_xml_untouched_when_backing_file_fails() {
+    // The backing .m1scr must be staged BEFORE the XML write: when file
+    // creation fails (here the Scripts path is occupied by a regular file so
+    // the directory cannot be created), the project XML must not have changed —
+    // no half-committed component pointing at a script that was never created.
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let dir = tmp_path("create_fn_tx");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Project.m1prj");
+    let xml = minimal_project();
+    std::fs::write(&path, xml).unwrap();
+    // Occupy the Scripts directory path with a FILE: create_dir_all must fail.
+    std::fs::write(dir.join("Scripts"), "not a directory").unwrap();
+
+    let out = Command::new(bin)
+        .args([
+            "create-scheduled-function",
+            "--name",
+            "Root.Engine.Compute",
+            "--project",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "create must fail when the backing file cannot be created: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        xml,
+        "XML must be untouched after a backing-file failure"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn create_parameter_cli_smoke() {
     let bin = env!("CARGO_BIN_EXE_m1-project");
     let path = tmp_path("create_parameter.m1prj");
