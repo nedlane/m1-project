@@ -710,16 +710,34 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
     };
 
-    let code = write_or_print(cli, project, &xml, &out)?;
     // A new script component needs an empty backing .m1scr created on disk, as
-    // M1-Build does on insert. Only on a real write.
-    if !cli.dry_run
+    // M1-Build does on insert. Only on a real write — and staged BEFORE the XML
+    // write (#90): a file-creation failure must not leave a half-committed
+    // project whose XML references a script that was never created. If the XML
+    // write itself then fails, the staged (empty, just-created) file is removed
+    // so the project directory is exactly as before.
+    let staged: Option<PathBuf> = if !cli.dry_run
         && !cli.stdout
         && let CreateScheduledFunction { name, .. } | CreateFunction { name, .. } = &cli.command
     {
-        create_script_file(project, name)?;
+        create_script_file(project, name)?
+    } else {
+        None
+    };
+    match write_or_print(cli, project, &xml, &out) {
+        Ok(code) => Ok(code),
+        Err(e) => {
+            if let Some(p) = &staged
+                && let Err(re) = std::fs::remove_file(p)
+            {
+                eprintln!(
+                    "warning: could not remove staged backing script {}: {re}",
+                    p.display()
+                );
+            }
+            Err(e)
+        }
     }
-    Ok(code)
 }
 
 /// Findings for script components whose backing `.m1scr` **exists but is empty** —
@@ -814,21 +832,80 @@ fn dbc_findings(project: &Path, xml: &str) -> Vec<m1_project::Finding> {
 
 /// Create the empty backing `.m1scr` for a newly-created script component, as
 /// M1-Build does on insert. Creates `Scripts/` if absent; never clobbers an
-/// existing file.
-fn create_script_file(project: &Path, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// existing file. Returns the path it created (`None` when a file already
+/// existed and was left as-is) so the caller can roll the creation back if the
+/// XML write fails (#90).
+fn create_script_file(
+    project: &Path,
+    name: &str,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
     let dir = scripts_dir(project);
     let path = dir.join(m1_project::script_relpath(name));
-    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     if path.exists() {
         eprintln!(
             "backing script already exists, left as-is: {}",
             path.display()
         );
+        Ok(None)
     } else {
-        std::fs::File::create(&path)?;
+        std::fs::File::create(&path).map_err(|e| format!("creating {}: {e}", path.display()))?;
         eprintln!("Created {}", path.display());
+        Ok(Some(path))
+    }
+}
+
+/// Validate the complete rename plan before any file is touched (#89): every
+/// destination whose source will actually move must be free. `std::fs::rename`
+/// replaces an existing destination on Unix, so proceeding would silently
+/// destroy an unrelated (e.g. orphaned) script's bytes — unrecoverable by the
+/// rollback, which can only move files back. The one allowed "occupied"
+/// destination is the source itself under a different case (a case-only rename
+/// on a case-insensitive filesystem). Duplicate destinations in one plan are
+/// rejected for the same reason: the second rename would clobber the first.
+fn preflight_renames(
+    project: &Path,
+    renames: &[m1_project::ScriptRename],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = scripts_dir(project);
+    let mut dests: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for r in renames {
+        let from = dir.join(&r.old);
+        let to = dir.join(&r.new);
+        if !from.exists() {
+            // The rename loop will skip this source with a warning; an occupied
+            // destination for a skipped rename is not touched, so not an error.
+            continue;
+        }
+        if !dests.insert(r.new.as_str()) {
+            return Err(format!(
+                "duplicate rename destination {}: refusing, the second rename would \
+                 overwrite the first",
+                to.display()
+            )
+            .into());
+        }
+        if to.exists() && !is_same_file(&from, &to) {
+            return Err(format!(
+                "rename destination already exists: {} (refusing to overwrite it; move \
+                 the existing file aside first, project unchanged)",
+                to.display()
+            )
+            .into());
+        }
     }
     Ok(())
+}
+
+/// Whether two paths resolve to the same file — true for a case-only rename on
+/// a case-insensitive filesystem, where the destination "exists" but IS the
+/// source. Resolution failure counts as "not the same" (the preflight then
+/// refuses, the safe direction).
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
 }
 
 /// Rename backing `.m1scr` files to follow a `rename_component` (old → new),
@@ -841,6 +918,7 @@ fn rename_script_files(
     project: &Path,
     renames: &[m1_project::ScriptRename],
 ) -> Result<Vec<m1_project::ScriptRename>, Box<dyn std::error::Error>> {
+    preflight_renames(project, renames)?;
     let dir = scripts_dir(project);
     let mut done: Vec<m1_project::ScriptRename> = Vec::new();
     for r in renames {
