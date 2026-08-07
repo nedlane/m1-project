@@ -322,6 +322,13 @@ enum Command {
         /// the exit code.
         #[arg(long)]
         check_mandatory_tags: bool,
+        /// Fail (error + exit 1) if the project's file format exceeds this version
+        /// (e.g. `10108`). The gate that stops an accidental M1-Build upgrade from
+        /// landing on `main`: a newer M1-Build silently migrates the format on open
+        /// and then locks out every machine on an older build. Recover with
+        /// `m1-project format --target <N>`.
+        #[arg(long, value_name = "N")]
+        max_format: Option<u32>,
     },
     /// List all components in the project.
     ListComponents {
@@ -330,6 +337,22 @@ enum Command {
         /// Emit JSON (array of objects with path/classname/type/unit/security/call_rate).
         #[arg(long)]
         json: bool,
+    },
+    /// Report the project's file-format version, or convert it with `--target`.
+    ///
+    /// Without `--target`, prints the current `FileFormat`, the M1-Build that last
+    /// wrote it, the package target, and the known format→writer mappings. With
+    /// `--target N`, rewrites the project to that format (only `10108 ↔ 10109` is
+    /// supported) — a byte-exact, reversible conversion. Downgrade is the case that
+    /// matters: it unblocks a teammate on an older M1-Build without everyone
+    /// upgrading in lockstep. Honours the global `--dry-run` / `--stdout`.
+    Format {
+        #[arg(long)]
+        project: PathBuf,
+        /// Convert the project to this file format (e.g. `10108`). Omit to only
+        /// report the current format.
+        #[arg(long, value_name = "N")]
+        target: Option<u32>,
     },
 }
 
@@ -366,6 +389,7 @@ impl Command {
             | Command::ListRates { project, .. }
             | Command::ListSecurity { project, .. }
             | Command::Validate { project, .. }
+            | Command::Format { project, .. }
             | Command::ListComponents { project, .. } => project,
         }
     }
@@ -419,10 +443,28 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             project,
             json,
             check_mandatory_tags,
+            max_format,
         } => {
             let (xml, _enc) = m1_workspace::read_text_with_encoding(project)
                 .map_err(|e| format!("{}: {e}", project.display()))?;
             let mut findings = m1_project::validate(&xml)?;
+            // File-format gate (#): fail when the project's FileFormat exceeds the
+            // team's pinned maximum — an accidental M1-Build upgrade the CI gate is
+            // there to catch. A project-level finding (no component path), so it
+            // uses the project file as its path.
+            if let Some(maxf) = max_format
+                && let Some(cur) = m1_project::file_format(&xml)
+                && cur > *maxf
+            {
+                findings.push(m1_project::Finding {
+                    level: m1_project::FindingLevel::Error,
+                    path: project.display().to_string(),
+                    message: format!(
+                        "file format {cur} exceeds the maximum allowed {maxf} — a newer M1-Build has migrated this project; downgrade it with `m1-project format --target {maxf}`"
+                    ),
+                    code: None,
+                });
+            }
             // File-aware checks (only the CLI does I/O; `validate()` stays pure):
             //   - a script component whose backing `.m1scr` is missing/empty is
             //     M1-Build's "Missing code" error;
@@ -555,6 +597,40 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 }
             }
             return Ok(ExitCode::SUCCESS);
+        }
+        Format { project, target } => {
+            let (xml, _enc) = m1_workspace::read_text_with_encoding(project)
+                .map_err(|e| format!("{}: {e}", project.display()))?;
+            match target {
+                // Report only.
+                None => {
+                    let r = m1_project::format_report(&xml)?;
+                    println!("{}", project.display());
+                    println!(
+                        "  FileFormat:      {}",
+                        r.file_format
+                            .map(|f| f.to_string())
+                            .unwrap_or_else(|| "(none)".into())
+                    );
+                    let writer = match (&r.product_name, &r.product_version) {
+                        (Some(n), Some(v)) => format!("{n} {v}"),
+                        (None, Some(v)) => v.clone(),
+                        _ => "(unknown)".into(),
+                    };
+                    println!("  Last written by: {writer}");
+                    println!(
+                        "  Package target:  {}",
+                        r.package_target.as_deref().unwrap_or("(unknown)")
+                    );
+                    println!("  Known writers:   {}", m1_project::known_writers_summary());
+                    return Ok(ExitCode::SUCCESS);
+                }
+                // Convert, honouring --dry-run / --stdout via the shared writer.
+                Some(t) => {
+                    let out = m1_project::convert_format(&xml, *t)?;
+                    return write_or_print(cli, project, &xml, &out);
+                }
+            }
         }
         _ => {}
     }
@@ -705,6 +781,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         | ListSecurity { .. }
         | Validate { .. }
         | ListComponents { .. }
+        | Format { .. }
         | RenameComponent { .. } => {
             unreachable!()
         }

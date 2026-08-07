@@ -244,6 +244,106 @@ fn validate_cli_exits_nonzero_on_bad_trigger() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A minimal project carrying a `FileFormat` header and one typed signature, for
+/// the `format` subcommand tests.
+fn project_with_format(file_format: u32, product_version: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\"?>\n\
+<MoTeCM1BuildSession ProductName=\"M1Build (x64)\" ProductVersion=\"{product_version}\">\n\
+ <Project FileFormat=\"{file_format}\" Name=\"UQR-EV\">\n\
+  <System VersionMajor=\"1\" VersionMinor=\"4\" VersionRelease=\"0\" VersionBuild=\"0108\"/>\n\
+  <ComponentStream>\n\
+   <List>\n\
+    <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n\
+   </List>\n\
+  </ComponentStream>\n\
+ </Project>\n\
+</MoTeCM1BuildSession>\n"
+    )
+}
+
+#[test]
+fn format_cli_reports_current_version() {
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("format_report.m1prj");
+    std::fs::write(&path, project_with_format(10108, "1.4.4.981")).unwrap();
+
+    let out = Command::new(bin)
+        .args(["format", "--project"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "format report failed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("FileFormat:") && stdout.contains("10108"),
+        "got: {stdout}"
+    );
+    assert!(
+        stdout.contains("1.4.4.981"),
+        "writer version missing: {stdout}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn format_cli_converts_and_writes() {
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("format_convert.m1prj");
+    std::fs::write(&path, project_with_format(10108, "1.4.4.981")).unwrap();
+
+    let out = Command::new(bin)
+        .args(["format", "--target", "10109", "--project"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "format convert failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        written.contains("FileFormat=\"10109\""),
+        "not upgraded: {written}"
+    );
+    assert!(written.contains("ProductVersion=\"1.4.5.556\""));
+    roxmltree::Document::parse(&written).expect("valid XML after convert");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn validate_cli_max_format_gate() {
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("format_gate.m1prj");
+    std::fs::write(&path, project_with_format(10109, "1.4.5.556")).unwrap();
+
+    // A 10109 project fails --max-format 10108 …
+    let out = Command::new(bin)
+        .args(["validate", "--max-format", "10108", "--project"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "gate should fail a too-new format");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("exceeds the maximum"), "got: {stdout}");
+
+    // … and passes --max-format 10109.
+    let ok = Command::new(bin)
+        .args(["validate", "--max-format", "10109", "--project"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&ok.stdout).contains("exceeds the maximum"),
+        "at-limit format must not be gated"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn validate_cli_flags_missing_code() {
     // A script component whose backing .m1scr is empty is M1-Build's "Missing
