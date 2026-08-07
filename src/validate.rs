@@ -42,6 +42,80 @@ impl fmt::Display for Finding {
     }
 }
 
+/// Reserved words that may not appear as a space-separated word in an M1 object
+/// name. M1-Build rejects such a name on open with **Error 1132 "Invalid object
+/// name"**: because object names may contain spaces, a name whose words include a
+/// keyword is ambiguous to the parser (`Receive IRTS and SGAMP 100Hz` reads as
+/// `Receive IRTS` *and* `SGAMP 100Hz`).
+///
+/// This is the M1 language's identifier-keyword set — the words the parser refuses
+/// as a bare identifier. It is derived from (and kept consistent with)
+/// `m1-typecheck`'s language-keyword model, which the incident report recommends as
+/// the source of truth; it is captured here as a list because `m1-project` does not
+/// depend on `m1-typecheck`. Two deliberate exclusions, both verified false-positive
+/// -free against the real corpora:
+///   - the scope anchors `In`/`Out`/`Parent`/`Root`/`This`/`Library` are legal in
+///     names (`Root` is the root component, `Parent` appears throughout trigger
+///     paths), so they are NOT reserved here; and
+///   - `expand`/`to`/`neq` are declared keywords in other syntactic positions but
+///     the parser accepts them as identifiers, so flagging them in a name would be
+///     a false positive on ordinary English-word names (e.g. a `… to …` name).
+///
+/// **Case-sensitive**, matching that parser: `and` is reserved but `And`/`AND` are
+/// not. Whether M1-Build's own 1132 check folds case is unverified; a case-sensitive
+/// rule is the false-positive-safe choice (see the incident report's caveat).
+const RESERVED_NAME_WORDS: &[&str] = &[
+    "and", "else", "eq", "false", "if", "is", "local", "not", "or", "static", "true", "when",
+];
+
+/// Why `segment` is not a valid M1 object-name segment, or `None` if it is valid.
+///
+/// Applies M1-Build's four **Naming Conventions** (User Manual, *Using the Main
+/// Window → Naming Conventions*, p.30), each of which M1-Build enforces on open
+/// with Error 1132:
+///   1. must begin with a letter;
+///   2. may contain only letters, digits and spaces;
+///   3. may not contain two consecutive spaces;
+///   4. no space-separated word may be a reserved keyword ([`RESERVED_NAME_WORDS`]).
+///
+/// `segment` is a single name segment (one dot-delimited part of a component's
+/// fully-qualified `Name`) — the dots are path separators, not name characters, so
+/// callers split on `.` and check each segment. Empty / whitespace-only segments are
+/// the concern of the blank-name check (Check 8) and return `None` here so the two
+/// checks do not both fire on the same object.
+fn invalid_name_segment_reason(segment: &str) -> Option<String> {
+    // Blank / whitespace-only is Check 8's territory; don't double-report.
+    if segment.trim().is_empty() {
+        return None;
+    }
+    // Rule 1: must begin with a letter.
+    if !segment
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+    {
+        return Some("must begin with a letter".into());
+    }
+    // Rule 2: only letters, digits and spaces.
+    if let Some(bad) = segment
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == ' '))
+    {
+        return Some(format!(
+            "contains the illegal character `{bad}` (only letters, digits and spaces are allowed)"
+        ));
+    }
+    // Rule 3: no two consecutive spaces.
+    if segment.contains("  ") {
+        return Some("contains two consecutive spaces".into());
+    }
+    // Rule 4: no space-separated word is a reserved keyword.
+    if let Some(kw) = segment.split(' ').find(|w| RESERVED_NAME_WORDS.contains(w)) {
+        return Some(format!("the word `{kw}` is a reserved keyword"));
+    }
+    None
+}
+
 /// Validate a project XML for structural correctness.  Returns a list of all
 /// findings (not fail-fast); the caller decides on exit code (non-empty → fail).
 ///
@@ -74,6 +148,10 @@ impl fmt::Display for Finding {
 /// 11. No DBCRoot module name (`DBC.<name>`) collides with a `Root.CAN.<name>` /
 ///     `Root.Control.<name>` project object — a Warning, since the exact scope of
 ///     the clash is not fully known (#83).
+/// 12. Every component's `Name` obeys M1-Build's Naming Conventions — begins with a
+///     letter, contains only letters/digits/spaces, no double space, and no
+///     space-separated word is a reserved keyword — otherwise M1-Build refuses to
+///     open the project with Error 1132 "Invalid object name".
 pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
     let doc = parse_xml(xml)?;
     let mut findings: Vec<Finding> = Vec::new();
@@ -151,6 +229,26 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                 message: "component Name segment is empty or whitespace-only — M1-Build cannot use it as a named object"
                     .into(),
                 code: None,
+            });
+        }
+        // Check 12: the component's own name segment obeys M1-Build's Naming
+        // Conventions (Error 1132 "Invalid object name"). Only the leaf segment is
+        // checked — every intermediate segment is itself a component whose own row
+        // enforces the same rule, so leaf-only covers the whole tree without
+        // double-reporting a shared ancestor (matches the blank-name check above).
+        // `validate` used to accept a name M1-Build rejects at open time (e.g. a
+        // scheduled function `… IRTS and SGAMP …` — `and` is a keyword), a
+        // false-negative in the CI gate. The `<Project>` element's own `Name`
+        // (e.g. `UQR-EV`, with a hyphen) is NOT an object name and is excluded for
+        // free: it is not a `<Component>` and so never reaches this loop.
+        else if let Some(reason) = invalid_name_segment_reason(seg) {
+            findings.push(Finding {
+                level: FindingLevel::Error,
+                path: nm.to_string(),
+                message: format!(
+                    "object name `{seg}` is not a valid M1 object name: {reason} — M1-Build rejects this with Error 1132"
+                ),
+                code: Some(1132),
             });
         }
         by_parent
@@ -664,5 +762,134 @@ fn collect_org_paths(
         };
         collect_org_paths(child, &path, out);
         out.insert(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Wrap a flat `<List>` of the given `Name`s in a minimal, valid project so the
+    /// Check-12 findings can be exercised end-to-end through `validate`.
+    fn project_with_names(names: &[&str]) -> String {
+        let mut list = String::new();
+        for nm in names {
+            list.push_str(&format!(
+                "    <Component Classname=\"BuiltIn.GroupCompound\" Name=\"{nm}\"/>\n"
+            ));
+        }
+        format!(
+            "<?xml version=\"1.0\"?>\n<MoTeCM1BuildSession>\n <Project Name=\"UQR-EV\">\n  <ComponentStream>\n   <List>\n{list}   </List>\n  </ComponentStream>\n </Project>\n</MoTeCM1BuildSession>\n"
+        )
+    }
+
+    fn naming_findings(names: &[&str]) -> Vec<Finding> {
+        validate(&project_with_names(names))
+            .expect("valid xml")
+            .into_iter()
+            .filter(|f| f.code == Some(1132))
+            .collect()
+    }
+
+    #[test]
+    fn reason_flags_each_of_the_four_rules() {
+        // Rule 4 — reserved keyword as a word.
+        assert!(
+            invalid_name_segment_reason("Receive IRTS and SGAMP 100Hz")
+                .unwrap()
+                .contains("`and` is a reserved keyword")
+        );
+        // Rule 1 — must begin with a letter.
+        assert!(
+            invalid_name_segment_reason("100Hz Receive")
+                .unwrap()
+                .contains("begin with a letter")
+        );
+        // Rule 3 — two consecutive spaces.
+        assert!(
+            invalid_name_segment_reason("Receive  IRTS")
+                .unwrap()
+                .contains("two consecutive spaces")
+        );
+        // Rule 2 — illegal character.
+        assert!(
+            invalid_name_segment_reason("Receive-IRTS")
+                .unwrap()
+                .contains("illegal character")
+        );
+        // Bare keyword.
+        assert!(invalid_name_segment_reason("if").is_some());
+        assert!(
+            invalid_name_segment_reason("Check if Valid")
+                .unwrap()
+                .contains("`if` is a reserved keyword")
+        );
+    }
+
+    #[test]
+    fn reason_accepts_legal_names() {
+        // The corrected form of the incident name, and other real project names.
+        for ok in [
+            "Receive IRTS SGAMP 100Hz",
+            "Receive IRRHS 500Hz",
+            "i2t Motor Monitoring Active",
+            "Root",
+            "Parent", // scope anchors are legal in names (caveat 2)
+            "Engine",
+            "On 100Hz",
+        ] {
+            assert_eq!(invalid_name_segment_reason(ok), None, "{ok} must be legal");
+        }
+    }
+
+    #[test]
+    fn reason_is_case_sensitive_on_keywords() {
+        // The parser (and this rule) reject lowercase `and`; capitalised variants
+        // are accepted, matching m1-typecheck's identifier lexer.
+        assert!(invalid_name_segment_reason("Left and Right").is_some());
+        assert_eq!(invalid_name_segment_reason("Left And Right"), None);
+        assert_eq!(invalid_name_segment_reason("Left AND Right"), None);
+    }
+
+    #[test]
+    fn reason_does_not_flag_expand_to_neq() {
+        // Deliberately NOT reserved here (they parse as identifiers) — flagging them
+        // would be a false positive on ordinary names.
+        for ok in ["Ramp to Target", "expand Range", "Compare neq Zero"] {
+            assert_eq!(invalid_name_segment_reason(ok), None, "{ok} must be legal");
+        }
+    }
+
+    #[test]
+    fn validate_reports_1132_for_bad_component_leaf() {
+        let findings =
+            naming_findings(&["Root", "Root.CAN", "Root.CAN.Receive IRTS and SGAMP 100Hz"]);
+        assert_eq!(findings.len(), 1, "exactly one 1132 finding expected");
+        let f = &findings[0];
+        assert_eq!(f.path, "Root.CAN.Receive IRTS and SGAMP 100Hz");
+        assert!(f.message.contains("Error 1132"));
+        assert!(f.message.contains("`and` is a reserved keyword"));
+    }
+
+    #[test]
+    fn validate_checks_only_the_leaf_segment_no_double_report() {
+        // The bad word is in the LEAF; the bad component and a child of it both
+        // exist. Only the component whose own leaf is bad is reported — the child's
+        // own leaf (`Value`) is fine, so no duplicate finding for the shared
+        // ancestor segment.
+        let findings = naming_findings(&["Root", "Root.Bad and Name", "Root.Bad and Name.Value"]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].path, "Root.Bad and Name");
+    }
+
+    #[test]
+    fn validate_does_not_flag_project_name_with_hyphen() {
+        // `UQR-EV` is the <Project> Name (a hyphen would fail Rule 2) but it is not
+        // a component, so it must never produce a 1132 finding.
+        let findings = naming_findings(&["Root", "Root.Engine"]);
+        assert!(
+            findings.is_empty(),
+            "clean project must have no 1132 finding"
+        );
     }
 }
