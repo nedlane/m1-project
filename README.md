@@ -43,6 +43,9 @@ m1-project create-channel --project Project.m1prj --name "Root.Driver.Throttle" 
 m1-project set-call-rate  --project Project.m1prj --script "Root.Engine.Control" --rate 100
 m1-project rename-component --project Project.m1prj --name "Root.Old" --new-name "New"
 m1-project validate       --project Project.m1prj          # read-only structural check
+m1-project validate       --project Project.m1prj --max-format 10108  # fail if a newer M1-Build migrated it
+m1-project format         --project Project.m1prj          # report the file-format version
+m1-project format         --project Project.m1prj --target 10108      # convert (downgrade) the file format
 m1-project list-components --project Project.m1prj --json  # machine-readable inventory
 ```
 
@@ -59,6 +62,18 @@ and flags:
   bookkeeping M1-Build does (rename rewrites triggers that resolve into the
   subtree and renames the backing `.m1scr` on disk; delete refuses to orphan
   referencing scripts unless `--force`).
+- **`format`** — report or convert the project's **file-format version**.
+  M1-Build silently upgrades a project's format on open (e.g. `10108` → `10109`
+  going from M1-Build 1.4.4 to 1.4.5), with no prompt and no supported way back,
+  and a newer format then locks out every machine on an older build. `format`
+  (no `--target`) reports the current `FileFormat`, the M1-Build that wrote it,
+  and the known format↔writer mappings; `format --target <N>` performs a
+  **byte-exact, reversible** conversion (only `10108 ↔ 10109` is supported).
+  Downgrade is the case that matters — it unblocks a teammate on an older
+  M1-Build without everyone upgrading in lockstep. Pair it with
+  `validate --max-format <N>` to **fail CI** when a project's format exceeds
+  the version the team has standardised on, so an accidental bump is caught in
+  the PR instead of on someone's bench.
 - **`validate` / `list-components` / `list-rates` / `list-security`** —
   read-only queries. `validate` mirrors M1-Build's own structural findings
   (referencing its error numbers), so CI can catch what M1-Build would flag
