@@ -245,6 +245,45 @@ fn validate_cli_exits_nonzero_on_bad_trigger() {
 }
 
 #[test]
+fn validate_cli_flags_invalid_object_name_1132() {
+    // A component whose name contains a reserved keyword (`and`) is what M1-Build
+    // rejects on open with Error 1132; `validate` must catch it and exit non-zero,
+    // where before it reported the project clean (the CI-gate false negative).
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let prj = "<?xml version=\"1.0\"?>\n\
+<MoTeCM1BuildSession><Project Name=\"UQR-EV\"><ComponentStream><List>\n\
+<Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n\
+<Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root.CAN\"/>\n\
+<Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root.CAN.Receive IRTS and SGAMP 100Hz\"/>\n\
+</List></ComponentStream></Project></MoTeCM1BuildSession>\n";
+    let path = tmp_path("validate_bad_name.m1prj");
+    std::fs::write(&path, prj).unwrap();
+
+    let out = Command::new(bin)
+        .args(["validate", "--project"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "validate should exit non-zero for an invalid object name"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("1132") && stdout.contains("reserved keyword"),
+        "expected a 1132 invalid-name finding, got: {stdout}"
+    );
+    // The <Project> Name `UQR-EV` (a hyphen) must NOT be flagged — it is not an
+    // object name.
+    assert!(
+        !stdout.contains("UQR-EV` is not"),
+        "the project name must not be flagged: {stdout}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn validate_cli_flags_missing_code() {
     // A script component whose backing .m1scr is empty is M1-Build's "Missing
     // code" error; the CLI's file-aware check must surface it and exit non-zero.
