@@ -83,6 +83,7 @@ impl std::error::Error for EditError {}
 // back a `Node`: it cannot compile, and the rebinds here (`let xml =
 // ensure_props(...)?;`) would only make the lifetime tangle worse.
 mod edits;
+mod format;
 mod query;
 mod validate;
 mod xml;
@@ -93,6 +94,10 @@ pub use edits::{
     delete_component, remove_tag, rename_component, script_relpath, set_call_rate, set_comment,
     set_display_range, set_dps, set_format, set_quantity, set_security, set_type, set_unit,
     set_validation, set_value,
+};
+pub use format::{
+    FormatReport, KNOWN_FORMATS, KnownFormat, convert_format, file_format, format_report,
+    known_writers_summary,
 };
 pub use query::{
     ComponentEntry, ScriptComponent, available_rates, list_components, resolve_trigger,
