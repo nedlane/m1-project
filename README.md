@@ -79,7 +79,7 @@ and flags:
   (referencing its error numbers), so CI can catch what M1-Build would flag
   before the project ever opens there. With `--json`, each finding carries a
   `code` field — the matching M1-Build error number (`1601`, `1338`, `1024`,
-  …) where one is known, or `null` for checks with no documented code — so a
+  `1132`, …) where one is known, or `null` for checks with no documented code — so a
   CI consumer can triage or suppress by error number without parsing the
   free-text `message`. `list-rates` and `list-security` expose
   the project's valid call-rate clocks and security groups (both
