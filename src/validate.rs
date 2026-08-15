@@ -537,7 +537,7 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
 }
 
 /// A DBCRoot module entry: the `BuiltIn.CAN.DBC` component `Name` (`DBC.<module>`),
-/// its `<module>` leaf (the `dbc/<module>.m1dbc` file stem it maps to), and the
+/// its `<module>` leaf (the `<module>.m1dbc` file stem it maps to), and the
 /// imported CAN database `MD5` (an attribute on the `<Component>` element). The
 /// `BuiltIn.CAN.DBCRoot` container itself is excluded.
 #[derive(Debug, Clone)]
@@ -551,8 +551,8 @@ pub struct DbcModule {
 }
 
 /// Enumerate the project's DBCRoot module entries (the `BuiltIn.CAN.DBC`
-/// components). Each maps to a `dbc/<module>.m1dbc` file; the CLI's file-aware DBC
-/// check ([`validate_dbc_file`]) reads and cross-checks those (#84).
+/// components). The CLI's file-aware DBC check ([`validate_dbc_file`]) finds and
+/// cross-checks each module's same-stem file within the governing workspace (#84).
 pub fn dbc_modules(xml: &str) -> Result<Vec<DbcModule>, EditError> {
     let doc = parse_xml(xml)?;
     let mut out = Vec::new();
@@ -578,7 +578,8 @@ pub fn dbc_modules(xml: &str) -> Result<Vec<DbcModule>, EditError> {
 /// Pure (`&str` in, findings out) so it is unit-testable; the CLI does the I/O and
 /// supplies `dbc_component` (the DBCRoot entry `Name`, used as the finding path),
 /// the `module` leaf and `expected_md5` from the DBCRoot entry, and the actual
-/// filename `stem`. Checks:
+/// filename `stem`, and `file` as the display path to name in findings (it is
+/// never opened by this pure function). Checks:
 ///   - the file has an internal `BuiltIn.CAN.DBC` component;
 ///   - its `Name` matches the DBCRoot module and the filename stem;
 ///   - its `MD5` matches the DBCRoot entry (an out-of-sync re-import otherwise);
@@ -591,6 +592,7 @@ pub fn validate_dbc_file(
     module: &str,
     expected_md5: Option<&str>,
     stem: &str,
+    file: &str,
 ) -> Result<Vec<Finding>, EditError> {
     let doc = parse_xml(dbc_xml)?;
     let mut findings = Vec::new();
@@ -603,7 +605,7 @@ pub fn validate_dbc_file(
             level: FindingLevel::Error,
             path: dbc_component.to_string(),
             message: format!(
-                "`{stem}.m1dbc` has no internal BuiltIn.CAN.DBC component — it is not a valid CAN database file"
+                "`{file}` has no internal BuiltIn.CAN.DBC component — it is not a valid CAN database file"
             ),
             code: None,
         }),
@@ -614,7 +616,7 @@ pub fn validate_dbc_file(
                     level: FindingLevel::Error,
                     path: dbc_component.to_string(),
                     message: format!(
-                        "`{stem}.m1dbc` internal module name `{inner_name}` does not match the DBCRoot module `{module}`"
+                        "`{file}` internal module name `{inner_name}` does not match the DBCRoot module `{module}`"
                     ),
                     code: None,
                 });
@@ -625,7 +627,7 @@ pub fn validate_dbc_file(
                     level: FindingLevel::Error,
                     path: dbc_component.to_string(),
                     message: format!(
-                        "`{stem}.m1dbc` internal module name `{inner_name}` does not match its filename stem `{stem}`"
+                        "`{file}` internal module name `{inner_name}` does not match its filename stem `{stem}`"
                     ),
                     code: None,
                 });
@@ -637,7 +639,7 @@ pub fn validate_dbc_file(
                         level: FindingLevel::Error,
                         path: dbc_component.to_string(),
                         message: format!(
-                            "`{stem}.m1dbc` internal MD5 `{inner_md5}` does not match the DBCRoot MD5 `{expected}` — the imported database is out of sync"
+                            "`{file}` internal MD5 `{inner_md5}` does not match the DBCRoot MD5 `{expected}` — the imported database is out of sync"
                         ),
                         code: None,
                     });
@@ -646,7 +648,7 @@ pub fn validate_dbc_file(
         }
     }
 
-    findings.extend(dbc_org_list_consistency(&doc, dbc_component, stem));
+    findings.extend(dbc_org_list_consistency(&doc, dbc_component, file));
     findings.sort_by(|a, b| a.path.cmp(&b.path).then(a.message.cmp(&b.message)));
     Ok(findings)
 }
@@ -657,7 +659,7 @@ pub fn validate_dbc_file(
 fn dbc_org_list_consistency(
     doc: &roxmltree::Document<'_>,
     path_prefix: &str,
-    stem: &str,
+    file: &str,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     let all_names: std::collections::HashSet<String> = doc
@@ -679,7 +681,7 @@ fn dbc_org_list_consistency(
                 level: FindingLevel::Error,
                 path: path_prefix.to_string(),
                 message: format!(
-                    "`{stem}.m1dbc`: <Organisation> node `{p}` has no matching <List> component — M1-Build cannot find its Properties"
+                    "`{file}`: <Organisation> node `{p}` has no matching <List> component — M1-Build cannot find its Properties"
                 ),
                 code: Some(1338),
             });
@@ -691,7 +693,7 @@ fn dbc_org_list_consistency(
                 level: FindingLevel::Error,
                 path: path_prefix.to_string(),
                 message: format!(
-                    "`{stem}.m1dbc`: <List> component `{nm}` is absent from the <Organisation> view — M1-Build cannot bind its Properties"
+                    "`{file}`: <List> component `{nm}` is absent from the <Organisation> view — M1-Build cannot bind its Properties"
                 ),
                 code: Some(1338),
             });
