@@ -861,50 +861,137 @@ fn scripts_dir(project: &Path) -> PathBuf {
         .join("Scripts")
 }
 
-/// File-aware DBC checks (#84): for every DBCRoot module, the backing
-/// `dbc/<module>.m1dbc` must exist and its internal `BuiltIn.CAN.DBC` Name/MD5 and
-/// `<List>`/`<Organisation>` view must be self-consistent. Like `missing_code`,
-/// only the CLI does this I/O; `validate()` stays pure. Files are read tolerantly
-/// (Windows-1252 fallback) as AGENTS.md requires for MoTeC files.
+/// File-aware DBC checks (#84): for every DBCRoot module, find the backing
+/// `<module>.m1dbc` within the workspace that governs the project, then check its
+/// internal `BuiltIn.CAN.DBC` Name/MD5 and `<List>`/`<Organisation>` view.
+///
+/// This deliberately uses m1-workspace's config discovery and DBC file walk
+/// instead of parsing `[dbc]` a second time. A project-local match wins. Outside
+/// the project, a unique filename match wins; when several exist, the imported
+/// module name and MD5 must identify exactly one. Ambiguity is an error rather
+/// than a guess at another project's sources.
 fn dbc_findings(project: &Path, xml: &str) -> Vec<m1_project::Finding> {
     let Ok(modules) = m1_project::dbc_modules(xml) else {
         return Vec::new();
     };
-    let dir = project
+    let project_dir = project
         .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("dbc");
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let project_dir = std::path::absolute(project_dir).unwrap_or_else(|_| project_dir.into());
+    let search_root = m1_workspace::find_upward(&project_dir, m1_workspace::TOOLS_CONFIG_FILE)
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| project_dir.clone());
+    let dbc_files = m1_workspace::find_dbc_files(&search_root);
     let mut out = Vec::new();
     for m in modules {
-        let path = dir.join(format!("{}.m1dbc", m.module));
-        let Ok(body) = m1_workspace::read_text(&path) else {
+        let mut candidates: Vec<&PathBuf> = dbc_files
+            .iter()
+            .filter(|path| {
+                path.file_stem().and_then(|stem| stem.to_str()) == Some(m.module.as_str())
+            })
+            .collect();
+        let local: Vec<&PathBuf> = candidates
+            .iter()
+            .copied()
+            .filter(|path| path.starts_with(&project_dir))
+            .collect();
+        if !local.is_empty() {
+            candidates = local;
+        }
+        let path = if candidates.len() == 1 {
+            candidates[0]
+        } else {
+            let matching: Vec<&PathBuf> = candidates
+                .iter()
+                .copied()
+                .filter(|path| dbc_file_matches_import(path, &m))
+                .collect();
+            if matching.len() == 1 {
+                matching[0]
+            } else {
+                let detail = if candidates.is_empty() {
+                    format!(
+                        "no matching file was found under `{}`",
+                        search_root.display()
+                    )
+                } else {
+                    let names = candidates
+                        .iter()
+                        .map(|path| dbc_display_path(path, &search_root))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("the candidates are {names}")
+                };
+                out.push(m1_project::Finding {
+                    level: m1_project::FindingLevel::Error,
+                    path: m.name.clone(),
+                    message: format!(
+                        "DBC module file `{}.m1dbc` cannot be located unambiguously: {detail}",
+                        m.module
+                    ),
+                    code: None,
+                });
+                continue;
+            }
+        };
+        let display = dbc_display_path(path, &search_root);
+        let Ok(body) = m1_workspace::read_text(path) else {
             out.push(m1_project::Finding {
                 level: m1_project::FindingLevel::Error,
                 path: m.name.clone(),
                 message: format!(
-                    "DBC module file `dbc/{}.m1dbc` is missing or unreadable — M1-Build cannot load the CAN database",
-                    m.module
+                    "DBC module file `{display}` is unreadable — M1-Build cannot load the CAN database"
                 ),
                 code: None,
             });
             continue;
         };
         // The file is discovered by the module name, so its stem IS the module.
-        match m1_project::validate_dbc_file(&body, &m.name, &m.module, m.md5.as_deref(), &m.module)
-        {
+        match m1_project::validate_dbc_file(
+            &body,
+            &m.name,
+            &m.module,
+            m.md5.as_deref(),
+            &m.module,
+            &display,
+        ) {
             Ok(fs) => out.extend(fs),
             Err(_) => out.push(m1_project::Finding {
                 level: m1_project::FindingLevel::Error,
                 path: m.name.clone(),
-                message: format!(
-                    "DBC module file `dbc/{}.m1dbc` is not well-formed XML",
-                    m.module
-                ),
+                message: format!("DBC module file `{display}` is not well-formed XML"),
                 code: None,
             }),
         }
     }
     out
+}
+
+/// Whether a same-stem candidate identifies the database imported by `module`.
+/// Used only to disambiguate; the full validation still runs after selection.
+fn dbc_file_matches_import(path: &Path, module: &m1_project::DbcModule) -> bool {
+    let Ok(text) = m1_workspace::read_text(path) else {
+        return false;
+    };
+    let Ok(doc) = roxmltree::Document::parse(&text) else {
+        return false;
+    };
+    doc.descendants().any(|node| {
+        node.attribute("Classname") == Some("BuiltIn.CAN.DBC")
+            && node.attribute("Name") == Some(module.module.as_str())
+            && module.md5.as_deref().is_none_or(|expected| {
+                node.attribute("MD5")
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+            })
+    })
+}
+
+fn dbc_display_path(path: &Path, root: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 /// Create the empty backing `.m1scr` for a newly-created script component, as

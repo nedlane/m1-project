@@ -81,7 +81,10 @@ and flags:
   `code` field — the matching M1-Build error number (`1601`, `1338`, `1024`,
   `1132`, …) where one is known, or `null` for checks with no documented code — so a
   CI consumer can triage or suppress by error number without parsing the
-  free-text `message`. `list-rates` and `list-security` expose
+  free-text `message`. File-aware DBC checks locate each `.m1dbc` through the
+  governing workspace rather than assuming a hard-coded `dbc/` directory. A
+  project-local source wins; otherwise the module name and imported MD5 must
+  identify one file unambiguously. `list-rates` and `list-security` expose
   the project's valid call-rate clocks and security groups (both
   project-specific — a project may declare custom security groups inline) so an
   editor can offer a picker that always matches what `set-call-rate` /

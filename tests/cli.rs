@@ -28,6 +28,134 @@ fn minimal_project() -> &'static str {
 </MoTeCM1BuildSession>\n"
 }
 
+fn dbc_project(md5: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\"?>\n\
+<MoTeCM1BuildSession><Project Name=\"T\"><ComponentStream>\
+<List>\
+<Component Classname=\"BuiltIn.CAN.DBCRoot\" Name=\"DBC\"/>\
+<Component Classname=\"BuiltIn.CAN.DBC\" MD5=\"{md5}\" Name=\"DBC.Sample\"/>\
+</List>\
+<Organisation><Component Name=\"DBC\"><Component Name=\"Sample\"/></Component></Organisation>\
+</ComponentStream></Project></MoTeCM1BuildSession>\n"
+    )
+}
+
+fn dbc_file(md5: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\"?>\n\
+<DBC><ComponentStream>\
+<List><Component Classname=\"BuiltIn.CAN.DBC\" MD5=\"{md5}\" Name=\"Sample\"/></List>\
+<Organisation><Component Name=\"Sample\"/></Organisation>\
+</ComponentStream></DBC>\n"
+    )
+}
+
+fn run_validate(project: &std::path::Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_m1-project"))
+        .args(["validate", "--project"])
+        .arg(project)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn validate_finds_dbc_in_workspace_source_directory() {
+    let root = tmp_path("dbc_workspace_source");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("proj")).unwrap();
+    std::fs::create_dir_all(root.join("can")).unwrap();
+    std::fs::write(root.join("m1-tools.toml"), "[dbc]\nsrc_dir = \"can\"\n").unwrap();
+    std::fs::write(
+        root.join("proj/Project.m1prj"),
+        dbc_project("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("can/Sample.m1dbc"),
+        dbc_file("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+    )
+    .unwrap();
+
+    let out = run_validate(&root.join("proj/Project.m1prj"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "the MD5 drift must fail validation");
+    assert!(
+        stdout.contains("`can/Sample.m1dbc` internal MD5"),
+        "the finding must prove the workspace source was read and name it: {stdout}"
+    );
+    assert!(!stdout.contains("dbc/Sample.m1dbc is missing"));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn validate_prefers_the_selected_projects_dbc_file() {
+    let root = tmp_path("dbc_project_scope");
+    let _ = std::fs::remove_dir_all(&root);
+    for version in ["01.00", "02.00"] {
+        std::fs::create_dir_all(root.join(format!("UQR-EV/{version}/dbc"))).unwrap();
+    }
+    std::fs::write(root.join("m1-tools.toml"), "[format]\nline_width = 100\n").unwrap();
+    std::fs::write(
+        root.join("UQR-EV/02.00/Project.m1prj"),
+        dbc_project("22222222222222222222222222222222"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("UQR-EV/01.00/dbc/Sample.m1dbc"),
+        dbc_file("11111111111111111111111111111111"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("UQR-EV/02.00/dbc/Sample.m1dbc"),
+        dbc_file("22222222222222222222222222222222"),
+    )
+    .unwrap();
+
+    let out = run_validate(&root.join("UQR-EV/02.00/Project.m1prj"));
+    assert!(
+        out.status.success(),
+        "validation must not read the other project's same-named source: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn validate_refuses_ambiguous_workspace_dbc_files() {
+    let root = tmp_path("dbc_ambiguous");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("proj")).unwrap();
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::create_dir_all(root.join("b")).unwrap();
+    std::fs::write(root.join("m1-tools.toml"), "").unwrap();
+    std::fs::write(
+        root.join("proj/Project.m1prj"),
+        dbc_project("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    )
+    .unwrap();
+    let source = dbc_file("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    std::fs::write(root.join("a/Sample.m1dbc"), &source).unwrap();
+    std::fs::write(root.join("b/Sample.m1dbc"), &source).unwrap();
+
+    let out = run_validate(&root.join("proj/Project.m1prj"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "ambiguous sources must fail validation"
+    );
+    assert!(
+        stdout.contains("cannot be located unambiguously"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("a/Sample.m1dbc"), "{stdout}");
+    assert!(stdout.contains("b/Sample.m1dbc"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn missing_project_error_names_the_file() {
     let out = Command::new(env!("CARGO_BIN_EXE_m1-project"))

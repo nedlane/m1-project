@@ -2083,6 +2083,7 @@ mod tests {
             "M150",
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             "M150",
+            "dbc/M150.m1dbc",
         )
         .unwrap();
         assert!(
@@ -2094,9 +2095,15 @@ mod tests {
     #[test]
     fn validate_dbc_file_flags_name_mismatch() {
         // DBCRoot says the module is Datalogger, the file's internal name is M150.
-        let findings =
-            validate_dbc_file(DBC_FILE, "DBC.Datalogger", "Datalogger", None, "Datalogger")
-                .unwrap();
+        let findings = validate_dbc_file(
+            DBC_FILE,
+            "DBC.Datalogger",
+            "Datalogger",
+            None,
+            "Datalogger",
+            "can/Datalogger.m1dbc",
+        )
+        .unwrap();
         assert!(
             findings
                 .iter()
@@ -2108,7 +2115,15 @@ mod tests {
     #[test]
     fn validate_dbc_file_flags_stem_mismatch() {
         // Internal name matches the DBCRoot module (M150) but not the filename stem.
-        let findings = validate_dbc_file(DBC_FILE, "DBC.M150", "M150", None, "Renamed").unwrap();
+        let findings = validate_dbc_file(
+            DBC_FILE,
+            "DBC.M150",
+            "M150",
+            None,
+            "Renamed",
+            "can/Renamed.m1dbc",
+        )
+        .unwrap();
         assert!(
             findings
                 .iter()
@@ -2125,6 +2140,7 @@ mod tests {
             "M150",
             Some("ffffffffffffffffffffffffffffffff"),
             "M150",
+            "sources/M150.m1dbc",
         )
         .unwrap();
         assert!(
@@ -2147,6 +2163,7 @@ mod tests {
             "M150",
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             "M150",
+            "dbc/M150.m1dbc",
         )
         .unwrap();
         assert!(
