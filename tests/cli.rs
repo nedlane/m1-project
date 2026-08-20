@@ -157,6 +157,50 @@ fn validate_refuses_ambiguous_workspace_dbc_files() {
 }
 
 #[test]
+fn validate_loads_selected_module_metadata_for_inherited_tags() {
+    let root = tmp_path("module_tags");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("modules")).unwrap();
+    let project = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession><Project Name="T">
+ <SelectedModuleSets><File Name="Test Module" VersionMajor="1" VersionMinor="02" VersionBuild="0003"/></SelectedModuleSets>
+ <ComponentStream><List>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="Test Module.Example" Name="Root.Example"/>
+  <Component Classname="BuiltIn.Reference" Name="Root.Example.Drive"><Props TargetCreation="AutoChannel" Target="This.Value"/></Component>
+ </List></ComponentStream>
+</Project></MoTeCM1BuildSession>
+"#;
+    let module = r#"<?xml version="1.0"?>
+<MoTecM1BuildModuleSet Name="Test Module"><Modules><ModuleStream><List>
+ <Module Base="BuiltIn.GroupCompound" Name="Group.Example"><ComponentStream><List>
+  <Component Classname="BuiltIn.GroupCompound" Name="Base"/>
+  <Component Classname="BuiltIn.Reference" Name="Base.Drive"><Props TargetCreation="AutoParam"><List.UserTags><Entry Value="Setup"/></List.UserTags></Props></Component>
+ </List></ComponentStream></Module>
+</List></ModuleStream></Modules></MoTecM1BuildModuleSet>
+"#;
+    std::fs::write(root.join("Project.m1prj"), project).unwrap();
+    std::fs::write(root.join("modules/Test Module.1.2.3.m1mod"), module).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_m1-project"))
+        .args(["validate", "--project"])
+        .arg(root.join("Project.m1prj"))
+        .args(["--modules-dir"])
+        .arg(root.join("modules"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "warnings do not fail validation: {stdout}"
+    );
+    assert!(stdout.contains("Root.Example.Drive.Value"), "{stdout}");
+    assert!(stdout.contains("warning 1140"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn missing_project_error_names_the_file() {
     let out = Command::new(env!("CARGO_BIN_EXE_m1-project"))
         .args(["list-rates", "--project", "/no/such/dir/Project.m1prj"])
