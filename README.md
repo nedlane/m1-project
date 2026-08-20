@@ -2,7 +2,7 @@
 
 A CLI that makes **structured, validated edits** to a MoTeC M1
 `Project.m1prj` — create channels, parameters, tables, groups and scripts,
-change a component's permissions / unit / type, set a script's execution rate
+change a component's permissions / unit / type / storage class, set a script's execution rate
 — **from the editor** instead of hand-editing a large XML file and guessing
 the conventions.
 
@@ -41,6 +41,7 @@ cargo install --git https://github.com/nedlane/m1-project.git --tag <latest>
 ```sh
 m1-project create-channel --project Project.m1prj --name "Root.Driver.Throttle" --type f32 --unit %
 m1-project set-call-rate  --project Project.m1prj --script "Root.Engine.Control" --rate 100
+m1-project set-storage-class --project Project.m1prj --component "Root.Control.Menu" --storage-class flash
 m1-project rename-component --project Project.m1prj --name "Root.Old" --new-name "New"
 m1-project validate       --project Project.m1prj          # read-only structural check
 m1-project validate       --project Project.m1prj --max-format 10108  # fail if a newer M1-Build migrated it
@@ -56,7 +57,7 @@ and flags:
   groups, and (scheduled) functions, including the backing `.m1scr` where
   M1-Build would create one.
 - **`set-*` / `add-tag` / `remove-tag`** — the M1-Build *Properties* rows:
-  security, type, a constant's literal value, unit, physical quantity,
+  security, type, channel storage class, a constant's literal value, unit, physical quantity,
   validation bounds, display format, tags, comments, and script call rate.
 - **`delete-component` / `rename-component`** — structure edits with the
   bookkeeping M1-Build does (rename rewrites triggers that resolve into the
@@ -89,6 +90,10 @@ and flags:
   project-specific — a project may declare custom security groups inline) so an
   editor can offer a picker that always matches what `set-call-rate` /
   `set-security` will accept.
+
+Flash-backed channels persist only when reachable project code calls
+`System.Preserve()`. Keep that call at 1 Hz or slower. `m1-typecheck` reports
+flash-backed projects that have no reachable preserve call.
 
 Global flags: `--dry-run` previews the edit as a unified diff (and reports the
 side effects it would perform, like script renames) while `--stdout` prints

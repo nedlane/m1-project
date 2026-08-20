@@ -12,12 +12,14 @@ pub struct ComponentEntry {
     pub path: String,
     /// Classname, e.g. `BuiltIn.Channel`.
     pub classname: String,
-    /// Storage type (`<Props Type>`), if present.
+    /// Value type (`<Props Type>`), if present.
     pub ty: Option<String>,
     /// Display unit (`<Props><Locale><Default Unit>`), if present.
     pub unit: Option<String>,
     /// Security level (`<Props Security>`), if present.
     pub security: Option<String>,
+    /// Channel storage class (`flash`/`volatile`); `None` for non-channels.
+    pub storage_class: Option<String>,
     /// Call rate trigger (`<Props SelectedTrigger>`), if present.
     pub call_rate: Option<String>,
     /// Physical quantity (`<Props Qty>`), if present — `set-quantity`'s read-back (#43).
@@ -51,6 +53,13 @@ pub fn list_components(xml: &str) -> Result<Vec<ComponentEntry>, EditError> {
         let security = props
             .and_then(|p| p.attribute("Security"))
             .map(str::to_string);
+        let storage_class = (classname == "BuiltIn.Channel").then(|| {
+            if props.and_then(|p| p.attribute("Storage")) == Some("Flash") {
+                "flash".to_string()
+            } else {
+                "volatile".to_string()
+            }
+        });
         let call_rate = props
             .and_then(|p| p.attribute("SelectedTrigger"))
             .map(str::to_string);
@@ -93,6 +102,7 @@ pub fn list_components(xml: &str) -> Result<Vec<ComponentEntry>, EditError> {
             ty,
             unit,
             security,
+            storage_class,
             call_rate,
             qty,
             tags,
