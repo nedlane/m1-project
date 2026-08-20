@@ -323,6 +323,11 @@ enum Command {
     Validate {
         #[arg(long)]
         project: PathBuf,
+        /// Directory containing the selected `.m1mod` files. May be repeated.
+        /// Without this option, M1_MODULES_PATH and standard M1-Build install
+        /// locations are searched. Module metadata enables inherited-tag checks.
+        #[arg(long, value_name = "DIR")]
+        modules_dir: Vec<PathBuf>,
         /// Emit JSON (array of objects with level/path/message) instead of text.
         #[arg(long)]
         json: bool,
@@ -451,13 +456,16 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         Validate {
             project,
+            modules_dir,
             json,
             check_mandatory_tags,
             max_format,
         } => {
             let (xml, _enc) = m1_workspace::read_text_with_encoding(project)
                 .map_err(|e| format!("{}: {e}", project.display()))?;
-            let mut findings = m1_project::validate(&xml)?;
+            let module_xmls = selected_module_xmls(&xml, modules_dir)?;
+            let module_refs: Vec<&str> = module_xmls.iter().map(String::as_str).collect();
+            let mut findings = m1_project::validate_with_modules(&xml, &module_refs)?;
             // File-format gate (#): fail when the project's FileFormat exceeds the
             // team's pinned maximum — an accidental M1-Build upgrade the CI gate is
             // there to catch. A project-level finding (no component path), so it
@@ -881,6 +889,73 @@ fn missing_code_findings(project: &Path, xml: &str) -> Vec<m1_project::Finding> 
         }
     }
     out
+}
+
+fn selected_module_xmls(
+    project_xml: &str,
+    explicit_dirs: &[PathBuf],
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let doc = roxmltree::Document::parse(project_xml)?;
+    let selected: Vec<String> = doc
+        .descendants()
+        .find(|node| node.has_tag_name("SelectedModuleSets"))
+        .into_iter()
+        .flat_map(|sets| sets.children().filter(|node| node.has_tag_name("File")))
+        .filter_map(|file| {
+            let name = file.attribute("Name")?;
+            let major = normalise_version_part(file.attribute("VersionMajor")?);
+            let minor = normalise_version_part(file.attribute("VersionMinor")?);
+            let build = normalise_version_part(file.attribute("VersionBuild")?);
+            Some(format!("{name}.{major}.{minor}.{build}.m1mod"))
+        })
+        .collect();
+
+    let search_dirs = module_search_dirs(explicit_dirs);
+    let mut xmls = Vec::new();
+    for filename in selected {
+        let Some(path) = search_dirs
+            .iter()
+            .map(|dir| dir.join(&filename))
+            .find(|path| path.is_file())
+        else {
+            continue;
+        };
+        let xml = m1_workspace::read_text(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        xmls.push(xml);
+    }
+    Ok(xmls)
+}
+
+fn normalise_version_part(part: &str) -> &str {
+    let trimmed = part.trim_start_matches('0');
+    if trimmed.is_empty() { "0" } else { trimmed }
+}
+
+fn module_search_dirs(explicit_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = if explicit_dirs.is_empty() {
+        std::env::var_os("M1_MODULES_PATH")
+            .map(|paths| std::env::split_paths(&paths).collect())
+            .unwrap_or_default()
+    } else {
+        explicit_dirs.to_vec()
+    };
+    if explicit_dirs.is_empty() {
+        if let Some(program_data) = std::env::var_os("PROGRAMDATA") {
+            dirs.push(
+                PathBuf::from(program_data)
+                    .join("MoTeC")
+                    .join("M1")
+                    .join("Build")
+                    .join("Modules"),
+            );
+        }
+        // WSL can run the Linux build while sharing the host M1-Build install.
+        dirs.push(PathBuf::from("/mnt/c/ProgramData/MoTeC/M1/Build/Modules"));
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
 }
 
 /// The project's `Scripts/` directory (sibling of `Project.m1prj`).

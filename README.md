@@ -44,6 +44,7 @@ m1-project set-call-rate  --project Project.m1prj --script "Root.Engine.Control"
 m1-project set-storage-class --project Project.m1prj --component "Root.Control.Menu" --storage-class flash
 m1-project rename-component --project Project.m1prj --name "Root.Old" --new-name "New"
 m1-project validate       --project Project.m1prj          # read-only structural check
+m1-project validate       --project Project.m1prj --modules-dir "/path/to/M1/Build/Modules"
 m1-project validate       --project Project.m1prj --max-format 10108  # fail if a newer M1-Build migrated it
 m1-project format         --project Project.m1prj          # report the file-format version
 m1-project format         --project Project.m1prj --target 10108      # convert (downgrade) the file format
@@ -85,11 +86,14 @@ and flags:
   free-text `message`. File-aware DBC checks locate each `.m1dbc` through the
   governing workspace rather than assuming a hard-coded `dbc/` directory. A
   project-local source wins; otherwise the module name and imported MD5 must
-  identify one file unambiguously. `list-rates` and `list-security` expose
-  the project's valid call-rate clocks and security groups (both
-  project-specific — a project may declare custom security groups inline) so an
-  editor can offer a picker that always matches what `set-call-rate` /
-  `set-security` will accept.
+  identify one file unambiguously. Module-inherited tag checks load the
+  project's exact selected `.m1mod` versions from `--modules-dir`,
+  `M1_MODULES_PATH`, or the standard Windows/WSL M1-Build installation. If
+  module files are unavailable, project-local checks still run without guessing
+  at proprietary module metadata. `list-rates` and `list-security` expose the
+  project's valid call-rate clocks and security groups (both project-specific —
+  a project may declare custom security groups inline) so an editor can offer a
+  picker that always matches what `set-call-rate` / `set-security` will accept.
 
 Flash-backed channels persist only when reachable project code calls
 `System.Preserve()`. Keep that call at 1 Hz or slower. `m1-typecheck` reports

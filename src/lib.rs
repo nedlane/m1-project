@@ -106,7 +106,7 @@ pub use query::{
 };
 pub use validate::{
     DbcModule, Finding, FindingLevel, dbc_modules, mandatory_tag_findings, validate,
-    validate_dbc_file,
+    validate_dbc_file, validate_with_modules,
 };
 
 #[cfg(test)]

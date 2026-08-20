@@ -4,6 +4,7 @@
 use crate::EditError;
 use crate::query::resolve_trigger;
 use crate::xml::*;
+use std::collections::HashMap;
 use std::fmt;
 
 const SYSTEM_TAGS: &[&str] = &["Engine", "Vehicle", "Driver"];
@@ -35,6 +36,121 @@ fn component_tags(node: roxmltree::Node<'_, '_>) -> Vec<String> {
         }
     }
     tags
+}
+
+fn component_overrides_tags(node: roxmltree::Node<'_, '_>) -> bool {
+    node.children()
+        .find(|child| child.has_tag_name("Props"))
+        .is_some_and(|props| {
+            props.has_attribute("SelectedTags")
+                || props
+                    .children()
+                    .any(|child| child.has_tag_name("List.UserTags"))
+        })
+}
+
+#[derive(Debug, Default)]
+struct ModuleComponent {
+    tags: Vec<String>,
+    target_creation: Option<String>,
+}
+
+type ModuleTemplate = HashMap<String, ModuleComponent>;
+type ModuleCatalog = HashMap<String, ModuleTemplate>;
+
+fn module_catalog(module_xmls: &[&str]) -> Result<ModuleCatalog, EditError> {
+    let mut catalog = ModuleCatalog::new();
+    for module_xml in module_xmls {
+        let doc = roxmltree::Document::parse(module_xml)
+            .map_err(|error| EditError::Invalid(format!("invalid .m1mod XML: {error}")))?;
+        let root = doc.root_element();
+        if !root.has_tag_name("MoTecM1BuildModuleSet") {
+            return Err(EditError::Invalid(format!(
+                "invalid .m1mod envelope: root element must be exactly <MoTecM1BuildModuleSet>, found <{}>",
+                root.tag_name().name()
+            )));
+        }
+        let set_name = root
+            .attribute("Name")
+            .ok_or_else(|| EditError::Invalid("invalid .m1mod: module set has no Name".into()))?;
+
+        for module in doc
+            .descendants()
+            .filter(|node| node.has_tag_name("Module") && node.has_attribute("Name"))
+        {
+            let module_name = module.attribute("Name").expect("filtered above");
+            let Some(leaf_name) = module_name.rsplit('.').next() else {
+                continue;
+            };
+            let class_name = format!("{set_name}.{leaf_name}");
+            let mut template = ModuleTemplate::new();
+            let Some(list) = module
+                .children()
+                .find(|node| node.has_tag_name("ComponentStream"))
+                .and_then(|stream| stream.children().find(|node| node.has_tag_name("List")))
+            else {
+                continue;
+            };
+            for component in list.children().filter(is_real_component) {
+                let Some(name) = component.attribute("Name") else {
+                    continue;
+                };
+                let relative_path = if name == "Base" {
+                    ""
+                } else if let Some(relative) = name.strip_prefix("Base.") {
+                    relative
+                } else {
+                    continue;
+                };
+                let props = component
+                    .children()
+                    .find(|child| child.has_tag_name("Props"));
+                template.insert(
+                    relative_path.to_string(),
+                    ModuleComponent {
+                        tags: component_tags(component),
+                        target_creation: props
+                            .and_then(|node| node.attribute("TargetCreation"))
+                            .map(str::to_string),
+                    },
+                );
+            }
+            catalog.insert(class_name, template);
+        }
+    }
+    Ok(catalog)
+}
+
+fn inherited_module_component<'a>(
+    path: &str,
+    class_by_path: &HashMap<String, String>,
+    catalog: &'a ModuleCatalog,
+) -> Option<&'a ModuleComponent> {
+    let mut candidate = Some(path);
+    while let Some(instance_path) = candidate {
+        if let Some(template) = class_by_path
+            .get(instance_path)
+            .and_then(|class_name| catalog.get(class_name))
+        {
+            let relative_path = path
+                .strip_prefix(instance_path)
+                .and_then(|tail| tail.strip_prefix('.'))
+                .unwrap_or("");
+            return template.get(relative_path);
+        }
+        candidate = parent_of(instance_path);
+    }
+    None
+}
+
+fn generated_class(target_creation: Option<&str>) -> Option<&'static str> {
+    match target_creation {
+        Some("AutoChannel") => Some("BuiltIn.Channel"),
+        Some("AutoParam") => Some("BuiltIn.Parameter"),
+        Some("AutoConst") => Some("BuiltIn.Constant"),
+        Some("AutoTable") => Some("BuiltIn.Table"),
+        _ => None,
+    }
 }
 
 fn tags_in_group<'a>(tags: &'a [String], group: &[&str]) -> Vec<&'a str> {
@@ -223,6 +339,24 @@ fn invalid_name_segment_reason(segment: &str) -> Option<String> {
 ///     space-separated word is a reserved keyword — otherwise M1-Build refuses to
 ///     open the project with Error 1132 "Invalid object name".
 pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
+    validate_with_catalog(xml, &ModuleCatalog::new())
+}
+
+/// Validate a project with the selected M1-Build module-set definitions.
+///
+/// Module instances inherit properties that are absent from `Project.m1prj`.
+/// Passing the corresponding `.m1mod` XML lets validation resolve those
+/// effective tags and `TargetCreation` values. [`validate`] remains the pure
+/// project-only entry point for callers that do not have module metadata.
+pub fn validate_with_modules(xml: &str, module_xmls: &[&str]) -> Result<Vec<Finding>, EditError> {
+    let catalog = module_catalog(module_xmls)?;
+    validate_with_catalog(xml, &catalog)
+}
+
+fn validate_with_catalog(
+    xml: &str,
+    module_catalog: &ModuleCatalog,
+) -> Result<Vec<Finding>, EditError> {
     let doc = parse_xml(xml)?;
     let mut findings: Vec<Finding> = Vec::new();
 
@@ -312,7 +446,24 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
         };
         let props = n.children().find(|c| c.has_tag_name("Props"));
         let trigger = props.and_then(|p| p.attribute("SelectedTrigger"));
-        let tags = component_tags(n);
+        let inherited = inherited_module_component(nm, &class_by_path, module_catalog);
+        let tags = if component_overrides_tags(n) {
+            component_tags(n)
+        } else if classname == "BuiltIn.Reference"
+            && props
+                .and_then(|node| node.attribute("TargetCreation"))
+                .is_some()
+        {
+            // A module's own generated components are internally consistent.
+            // The inherited tag becomes actionable here only when the project
+            // serialises a TargetCreation choice for the Reference: that choice
+            // can change the generated kind and make the inherited tag illegal.
+            inherited
+                .map(|component| component.tags.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         tags_by_path.insert(nm.to_string(), tags.clone());
 
         for (group_name, group) in [
@@ -350,8 +501,15 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
         let generated_value_path = format!("{nm}.Value");
         let generated_value_class = class_by_path.get(&generated_value_path);
         let (effective_path, effective_classname) = if classname == "BuiltIn.Reference" {
-            generated_value_class
-                .map(|generated| (generated_value_path.as_str(), generated.as_str()))
+            let target_creation = props
+                .and_then(|node| node.attribute("TargetCreation"))
+                .or_else(|| inherited.and_then(|component| component.target_creation.as_deref()));
+            generated_class(target_creation)
+                .map(|generated| (generated_value_path.as_str(), generated))
+                .or_else(|| {
+                    generated_value_class
+                        .map(|generated| (generated_value_path.as_str(), generated.as_str()))
+                })
                 .unwrap_or((nm, classname))
         } else if assigned_io {
             (
@@ -370,7 +528,10 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
             effective_classname,
             "BuiltIn.Parameter" | "BuiltIn.Constant" | "BuiltIn.Table" | "BuiltIn.CalibrationTable"
         );
-        let setup_illegal = has_tag(&tags, "Setup") && !setup_allowed;
+        // Setup + Input/Output belongs to the assigned resource as a complete
+        // pair. Its generated IOResourceParameter is an implementation detail,
+        // not an independently-tagged Parameter to reject (#111).
+        let setup_illegal = has_tag(&tags, "Setup") && !setup_allowed && !assigned_io;
         if pin_illegal || setup_illegal {
             let illegal = if pin_illegal { "Pin" } else { "Setup" };
             let legal_set = if assigned_io {
@@ -1153,6 +1314,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_an_illegal_assigned_input_resource_tag_set() {
+        let xml = project_with_components(
+            r#"    <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+    <Component Classname="BuiltIn.IOResourceValueInput" Name="Root.Input Resource"><Props NameCreation="AutoParam" NameTarget="This.Value"><List.UserTags><Entry Value="Pin"/><Entry Value="Input"/></List.UserTags></Props></Component>
+    <Component Classname="BuiltIn.IOResourceParameter" Name="Root.Input Resource.Value"><Props Security="Resource"/></Component>
+"#,
+        );
+
+        let unsupported = findings_with_code(&xml, 1140);
+        assert_eq!(unsupported.len(), 1, "{unsupported:?}");
+        assert_eq!(unsupported[0].path, "Root.Input Resource.Value");
+        assert!(unsupported[0].message.contains("Setup + Input"));
+    }
+
+    #[test]
     fn validate_resolves_inherited_tags_and_project_target_creation() {
         let project = project_with_components(
             r#"    <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
@@ -1174,7 +1350,8 @@ mod tests {
  </List></ModuleStream></Modules>
 </MoTecM1BuildModuleSet>"#;
 
-        let findings = validate_with_modules(&project, &[module]).expect("valid project and module");
+        let findings =
+            validate_with_modules(&project, &[module]).expect("valid project and module");
         let unsupported: Vec<_> = findings
             .into_iter()
             .filter(|finding| finding.code == Some(1140))
