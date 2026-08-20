@@ -861,6 +861,30 @@ pub fn set_type(xml: &str, component: &str, ty: &str) -> Result<String, EditErro
     set_props_attr(xml, component, "Type", ty)
 }
 
+/// Set a channel's storage class. `flash` writes the exact M1-Build form
+/// `Storage="Flash"`; `volatile` removes the attribute because absence is the
+/// serialised volatile value.
+pub fn set_storage_class(
+    xml: &str,
+    component: &str,
+    storage_class: &str,
+) -> Result<String, EditError> {
+    let loc = locate(xml, component)?;
+    if loc.classname != "BuiltIn.Channel" {
+        return Err(EditError::Invalid(format!(
+            "`{component}` is a {} — storage class is supported only for BuiltIn.Channel",
+            loc.classname
+        )));
+    }
+    match storage_class.to_ascii_lowercase().as_str() {
+        "flash" => set_props_attr(xml, component, "Storage", "Flash"),
+        "volatile" => remove_props_attr(xml, component, "Storage"),
+        _ => Err(EditError::Invalid(format!(
+            "unknown storage class `{storage_class}`; valid: flash, volatile"
+        ))),
+    }
+}
+
 /// Set (or replace) a component's display unit (`<Props><Locale><Default Unit>`).
 pub fn set_unit(xml: &str, component: &str, unit: &str) -> Result<String, EditError> {
     if unit.trim().is_empty() {

@@ -20,6 +20,7 @@
 //! - [`set_security`] — set/replace a component's `<Props Security="…">`.
 //! - [`set_unit`] — set/replace a component's display unit (`<Locale><Default Unit>`).
 //! - [`set_type`] — set/replace a component's storage `Type`.
+//! - [`set_storage_class`] — set a channel to flash-backed or volatile storage.
 //! - [`set_quantity`] — set/replace a component's physical quantity (`<Props Qty>`).
 //! - [`set_validation`] — set/clear a value component's `Validation`/`ValMin`/`ValMax`.
 //! - [`set_format`]/[`set_dps`]/[`set_display_range`] — the Display-section
@@ -92,8 +93,8 @@ pub use edits::{
     ScriptRename, TableAxis, add_tag, create_channel, create_constant, create_function,
     create_group, create_parameter, create_reference, create_scheduled_function, create_table,
     delete_component, remove_tag, rename_component, script_relpath, set_call_rate, set_comment,
-    set_display_range, set_dps, set_format, set_quantity, set_security, set_type, set_unit,
-    set_validation, set_value,
+    set_display_range, set_dps, set_format, set_quantity, set_security, set_storage_class,
+    set_type, set_unit, set_validation, set_value,
 };
 pub use format::{
     FormatReport, KNOWN_FORMATS, KnownFormat, convert_format, file_format, format_report,
@@ -523,6 +524,62 @@ mod tests {
         assert!(out.contains(r#"Type="u16""#));
         let out2 = set_type(&out, "Root.Engine.Plain", "s32").unwrap();
         assert!(out2.contains(r#"Type="s32""#) && !out2.contains(r#"Type="u16""#));
+    }
+
+    #[test]
+    fn set_storage_class_sets_replaces_and_clears_channel_storage() {
+        let flash = set_storage_class(PRJ, "Root.Engine.Speed", "flash").unwrap();
+        parses(&flash);
+        assert!(flash.contains(r#"<Props Storage="Flash" Type="f32" Security="Tune"/>"#));
+
+        let volatile = set_storage_class(&flash, "Root.Engine.Speed", "volatile").unwrap();
+        parses(&volatile);
+        assert_eq!(
+            volatile, PRJ,
+            "Flash -> volatile must restore the original bytes"
+        );
+    }
+
+    #[test]
+    fn set_storage_class_is_parser_scoped_and_channel_only() {
+        let xml = r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession><Project Name="T"><DataTypes><Type Name="Persist" Storage="enum"/></DataTypes><ComponentStream><List>
+<Component Classname="BuiltIn.Channel" Name="Root.Channel"><Props Note="Storage=&quot;Other&quot;"/><!-- Storage="Comment" --></Component>
+<Component Classname="BuiltIn.Parameter" Name="Root.Parameter"><Props/></Component>
+<Component Classname="BuiltIn.Table" Name="Root.Table"><Props/></Component>
+</List></ComponentStream></Project></MoTeCM1BuildSession>"#;
+        let out = set_storage_class(xml, "Root.Channel", "flash").unwrap();
+        parses(&out);
+        assert!(out.contains(r#"<Props Storage="Flash" Note="Storage=&quot;Other&quot;"/>"#));
+        assert!(out.contains(r#"<Type Name="Persist" Storage="enum"/>"#));
+        assert!(out.contains(r#"<!-- Storage="Comment" -->"#));
+        assert!(set_storage_class(xml, "Root.Parameter", "flash").is_err());
+        assert!(set_storage_class(xml, "Root.Table", "flash").is_err());
+        assert!(set_storage_class(xml, "Root.Channel", "disk").is_err());
+    }
+
+    #[test]
+    fn list_components_reports_channel_storage_class() {
+        let flash = set_storage_class(PRJ, "Root.Engine.Speed", "flash").unwrap();
+        let entries = list_components(&flash).unwrap();
+        let speed = entries
+            .iter()
+            .find(|e| e.path == "Root.Engine.Speed")
+            .unwrap();
+        let plain = entries
+            .iter()
+            .find(|e| e.path == "Root.Engine.Plain")
+            .unwrap();
+        assert_eq!(speed.storage_class.as_deref(), Some("flash"));
+        assert_eq!(plain.storage_class.as_deref(), Some("volatile"));
+        assert!(
+            entries
+                .iter()
+                .find(|e| e.path == "Root.Engine.Selector")
+                .unwrap()
+                .storage_class
+                .is_none()
+        );
     }
 
     #[test]
@@ -2187,7 +2244,7 @@ mod tests {
     }
 
     #[test]
-    fn mandatory_tag_findings_flags_untagged_value_object_only() {
+    fn mandatory_tag_findings_flags_tables_not_ordinary_values() {
         let prj = r#"<?xml version="1.0"?>
 <MoTeCM1BuildSession>
  <Project Name="T">
@@ -2196,6 +2253,7 @@ mod tests {
     <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
     <Component Classname="BuiltIn.Channel" Name="Root.Untagged"><Props Type="f32"/></Component>
     <Component Classname="BuiltIn.Channel" Name="Root.Tagged"><Props Type="f32"><List.UserTags><Entry Value="Input"/></List.UserTags></Props></Component>
+    <Component Classname="BuiltIn.Table" Name="Root.Untagged Table"><Props Security="Tune"/></Component>
    </List>
   </ComponentStream>
  </Project>
@@ -2208,13 +2266,12 @@ mod tests {
                 .iter()
                 .all(|f| f.level == FindingLevel::Warning && f.code == Some(1142))
         );
+        assert!(findings.iter().any(|f| f.path == "Root.Untagged Table"));
         assert!(
-            findings.iter().any(|f| f.path == "Root.Untagged"),
-            "untagged channel must be flagged: {findings:?}"
-        );
-        assert!(
-            !findings.iter().any(|f| f.path == "Root.Tagged"),
-            "tagged channel must NOT be flagged: {findings:?}"
+            !findings
+                .iter()
+                .any(|f| matches!(f.path.as_str(), "Root.Untagged" | "Root.Tagged")),
+            "ordinary channels must not be flagged: {findings:?}"
         );
         // The GroupCompound is not a value object — not flagged.
         assert!(!findings.iter().any(|f| f.path == "Root"));

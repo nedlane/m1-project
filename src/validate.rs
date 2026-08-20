@@ -6,6 +6,76 @@ use crate::query::resolve_trigger;
 use crate::xml::*;
 use std::fmt;
 
+const SYSTEM_TAGS: &[&str] = &["Engine", "Vehicle", "Driver"];
+const TYPE_TAGS: &[&str] = &["Normal", "Diagnostic", "Advanced", "Setup", "Tune", "Pin"];
+const IO_TAGS: &[&str] = &["Input", "Output"];
+
+fn component_tags(node: roxmltree::Node<'_, '_>) -> Vec<String> {
+    let Some(props) = node.children().find(|c| c.has_tag_name("Props")) else {
+        return Vec::new();
+    };
+    let mut tags: Vec<String> = props
+        .attribute("SelectedTags")
+        .into_iter()
+        .flat_map(str::split_whitespace)
+        .map(str::to_string)
+        .collect();
+    if let Some(list) = props.children().find(|c| c.has_tag_name("List.UserTags")) {
+        for tag in list
+            .children()
+            .filter(|c| c.has_tag_name("Entry"))
+            .filter_map(|c| c.attribute("Value"))
+        {
+            if !tags
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(tag))
+            {
+                tags.push(tag.to_string());
+            }
+        }
+    }
+    tags
+}
+
+fn tags_in_group<'a>(tags: &'a [String], group: &[&str]) -> Vec<&'a str> {
+    tags.iter()
+        .filter(|tag| group.iter().any(|member| member.eq_ignore_ascii_case(tag)))
+        .map(String::as_str)
+        .collect()
+}
+
+fn has_tag(tags: &[String], expected: &str) -> bool {
+    tags.iter().any(|tag| tag.eq_ignore_ascii_case(expected))
+}
+
+fn is_assigned_io_resource(classname: &str, props: Option<roxmltree::Node<'_, '_>>) -> bool {
+    matches!(
+        classname,
+        "BuiltIn.IOResourceValueInput" | "BuiltIn.IOResourceValueOutput"
+    ) && props.and_then(|p| p.attribute("NameCreation")) == Some("AutoParam")
+}
+
+fn is_enum_type(ty: Option<&str>) -> bool {
+    ty.is_some_and(|ty| ty.starts_with("::") || (ty.contains('.') && !ty.starts_with("$(")))
+}
+
+fn owned_by_package_object(
+    path: &str,
+    class_by_path: &std::collections::HashMap<String, String>,
+) -> bool {
+    let mut parent = parent_of(path);
+    while let Some(path) = parent {
+        if class_by_path
+            .get(path)
+            .is_some_and(|classname| !classname.starts_with("BuiltIn."))
+        {
+            return true;
+        }
+        parent = parent_of(path);
+    }
+    false
+}
+
 /// A single validation finding.
 #[derive(Debug)]
 pub struct Finding {
@@ -156,6 +226,42 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
     let doc = parse_xml(xml)?;
     let mut findings: Vec<Finding> = Vec::new();
 
+    let root = doc.root_element();
+    if !root.has_tag_name("MoTeCM1BuildSession") {
+        findings.push(Finding {
+            level: FindingLevel::Error,
+            path: root.tag_name().name().to_string(),
+            message: "invalid project document envelope: root element must be exactly <MoTeCM1BuildSession>"
+                .into(),
+            code: None,
+        });
+        return Ok(findings);
+    }
+    let project_children = root
+        .children()
+        .filter(|child| child.is_element() && child.has_tag_name("Project"))
+        .count();
+    if project_children != 1 {
+        findings.push(Finding {
+            level: FindingLevel::Error,
+            path: "MoTeCM1BuildSession".into(),
+            message: format!(
+                "invalid project document envelope: expected exactly one direct <Project> child, found {project_children}"
+            ),
+            code: None,
+        });
+    }
+    let class_by_path: std::collections::HashMap<String, String> = doc
+        .descendants()
+        .filter(is_real_component)
+        .filter_map(|node| {
+            Some((
+                node.attribute("Name")?.to_string(),
+                node.attribute("Classname")?.to_string(),
+            ))
+        })
+        .collect();
+
     // The project's declared security groups, if it declares any (Check 7).
     // `None` => no <SecurityMgr> (Automatic security mode) => skip the check.
     let declared_roles: Option<std::collections::HashSet<String>> =
@@ -184,6 +290,8 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
     // the `<Component>` element itself, not on `<Props>`. The `BuiltIn.CAN.DBCRoot`
     // container (no MD5) is deliberately excluded.
     let mut dbc_modules: Vec<(String, Option<String>)> = Vec::new();
+    let mut tags_by_path: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
 
     for n in doc.descendants() {
         if n.has_tag_name("Organisation") {
@@ -204,6 +312,112 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
         };
         let props = n.children().find(|c| c.has_tag_name("Props"));
         let trigger = props.and_then(|p| p.attribute("SelectedTrigger"));
+        let tags = component_tags(n);
+        tags_by_path.insert(nm.to_string(), tags.clone());
+
+        for (group_name, group) in [
+            ("System", SYSTEM_TAGS),
+            ("Type", TYPE_TAGS),
+            ("Input/Output", IO_TAGS),
+        ] {
+            let selected = tags_in_group(&tags, group);
+            if selected.len() > 1 {
+                findings.push(Finding {
+                    level: FindingLevel::Warning,
+                    path: nm.to_string(),
+                    message: format!(
+                        "conflicting tags {} are all in the single-select {group_name} group; replace them with one group member (M1 Build warning 1141)",
+                        selected
+                            .iter()
+                            .map(|tag| format!("`{tag}`"))
+                            .collect::<Vec<_>>()
+                            .join(" and ")
+                    ),
+                    code: Some(1141),
+                });
+            }
+        }
+
+        let assigned_io = is_assigned_io_resource(classname, props);
+        let required_io = if classname == "BuiltIn.IOResourceValueOutput" {
+            "Output"
+        } else {
+            "Input"
+        };
+        // Tags declared on a Reference or an assigned IO resource apply to the
+        // generated `.Value` object. Validate and report that effective object,
+        // matching the path M1 Build names in warning 1140.
+        let generated_value_path = format!("{nm}.Value");
+        let generated_value_class = class_by_path.get(&generated_value_path);
+        let (effective_path, effective_classname) = if classname == "BuiltIn.Reference" {
+            generated_value_class
+                .map(|generated| (generated_value_path.as_str(), generated.as_str()))
+                .unwrap_or((nm, classname))
+        } else if assigned_io {
+            (
+                generated_value_class
+                    .map(|_| generated_value_path.as_str())
+                    .unwrap_or(nm),
+                generated_value_class
+                    .map(String::as_str)
+                    .unwrap_or("BuiltIn.Parameter"),
+            )
+        } else {
+            (nm, classname)
+        };
+        let pin_illegal = has_tag(&tags, "Pin") && effective_classname != "BuiltIn.Channel";
+        let setup_allowed = matches!(
+            effective_classname,
+            "BuiltIn.Parameter" | "BuiltIn.Constant" | "BuiltIn.Table" | "BuiltIn.CalibrationTable"
+        );
+        let setup_illegal = has_tag(&tags, "Setup") && !setup_allowed;
+        if pin_illegal || setup_illegal {
+            let illegal = if pin_illegal { "Pin" } else { "Setup" };
+            let legal_set = if assigned_io {
+                format!("Setup + {required_io}")
+            } else if matches!(
+                effective_classname,
+                "BuiltIn.Parameter"
+                    | "BuiltIn.Constant"
+                    | "BuiltIn.Table"
+                    | "BuiltIn.CalibrationTable"
+            ) {
+                "Setup".into()
+            } else {
+                "Normal".into()
+            };
+            findings.push(Finding {
+                level: FindingLevel::Warning,
+                path: effective_path.to_string(),
+                message: format!(
+                    "tag `{illegal}` is unsupported on {effective_classname}; replace it with the legal tag set {legal_set} (M1 Build warning 1140)"
+                ),
+                code: Some(1140),
+            });
+        } else if assigned_io && !(has_tag(&tags, "Setup") && has_tag(&tags, required_io)) {
+            findings.push(Finding {
+                level: FindingLevel::Warning,
+                path: nm.to_string(),
+                message: format!(
+                    "assigned IO resource needs the complete tag set Setup + {required_io}; replace any conflicting Type tag with Setup rather than adding a second Type tag (M1 Build warning 1648)"
+                ),
+                code: Some(1648),
+            });
+        }
+
+        if classname == "BuiltIn.Channel"
+            && nm.rsplit('.').next() == Some("State")
+            && is_enum_type(props.and_then(|p| p.attribute("Type")))
+            && !has_tag(&tags, "Normal")
+        {
+            findings.push(Finding {
+                level: FindingLevel::Warning,
+                path: nm.to_string(),
+                message: "enum-typed State channel needs the Normal Type tag; replace the existing Type tag with Normal rather than adding a conflicting tag (M1 Build warning 1647)"
+                    .into(),
+                code: Some(1647),
+            });
+        }
 
         all_names.insert(nm.to_string());
         if classname == "BuiltIn.EventKernel" {
@@ -321,6 +535,24 @@ pub fn validate(xml: &str) -> Result<Vec<Finding>, EditError> {
                     "Security group `{sec}` is not declared in the project's <SecurityRoles> — M1-Build cannot bind it"
                 ),
                 code: Some(1601),
+            });
+        }
+    }
+
+    for sensor in all_names
+        .iter()
+        .filter(|name| name.rsplit('.').next() == Some("Sensor"))
+    {
+        let value = format!("{sensor}.Value");
+        if let Some(tags) = tags_by_path.get(&value)
+            && !has_tag(tags, "Normal")
+        {
+            findings.push(Finding {
+                level: FindingLevel::Warning,
+                path: value,
+                message: "Sensor.Value needs the Normal Type tag; replace the existing Type tag with Normal rather than adding a conflicting tag (M1 Build warning 1649)"
+                    .into(),
+                code: Some(1649),
             });
         }
     }
@@ -702,42 +934,37 @@ fn dbc_org_list_consistency(
     findings
 }
 
-/// Opt-in heuristic for M1-Build's mandatory-tag warning 1142 ("a mandatory Type
-/// tag group is not selected"). OFF by default — enabled only via
-/// `validate --check-mandatory-tags` — because the real projects carry hundreds of
-/// legitimately-untagged objects and the full tag-GROUP model (which groups are
-/// mandatory, which tags belong to them) is NOT encoded in the `.m1prj`, so it
-/// cannot be derived offline. The clearest safe sub-case is flagged: a
-/// value-bearing Channel/Parameter/Table that carries NO user tag at all (so no
-/// tag from any group, mandatory or not, is selected). Emitted as WARNINGs, which
-/// never change the exit code / fail CI.
+/// Known M1-Build warning 1142 cases. Ordinary untagged channels and parameters
+/// are legal. M1-Build requires a Type tag on tables and on IO resources that
+/// create an assigned parameter (`NameCreation="AutoParam"`).
 pub fn mandatory_tag_findings(xml: &str) -> Result<Vec<Finding>, EditError> {
     let doc = parse_xml(xml)?;
     let mut findings = Vec::new();
+    let class_by_path: std::collections::HashMap<String, String> = doc
+        .descendants()
+        .filter(is_real_component)
+        .filter_map(|node| {
+            Some((
+                node.attribute("Name")?.to_string(),
+                node.attribute("Classname")?.to_string(),
+            ))
+        })
+        .collect();
     for n in doc.descendants().filter(is_real_component) {
         let classname = n.attribute("Classname").unwrap_or("");
-        if !matches!(
-            classname,
-            "BuiltIn.Channel" | "BuiltIn.Parameter" | "BuiltIn.Table" | "BuiltIn.CalibrationTable"
-        ) {
-            continue;
-        }
         let Some(nm) = n.attribute("Name") else {
             continue;
         };
-        let has_tag = n
-            .children()
-            .find(|c| c.has_tag_name("Props"))
-            .and_then(|p| p.children().find(|c| c.has_tag_name("List.UserTags")))
-            .map(|t| t.children().any(|e| e.has_tag_name("Entry")))
-            .unwrap_or(false);
-        if !has_tag {
+        let props = n.children().find(|c| c.has_tag_name("Props"));
+        let project_local_table = matches!(classname, "BuiltIn.Table" | "BuiltIn.CalibrationTable")
+            && !owned_by_package_object(nm, &class_by_path);
+        let applicable = project_local_table || is_assigned_io_resource(classname, props);
+        let tags = component_tags(n);
+        if applicable && tags_in_group(&tags, TYPE_TAGS).is_empty() {
             findings.push(Finding {
                 level: FindingLevel::Warning,
                 path: nm.to_string(),
-                message:
-                    "no user tag selected — M1-Build warns when a mandatory tag group (e.g. Type) has no tag (Build 1142)"
-                        .into(),
+                message: "mandatory Type tag not selected (M1 Build warning 1142)".into(),
                 code: Some(1142),
             });
         }
@@ -770,6 +997,161 @@ fn collect_org_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn project_with_components(components: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\"?>\n<MoTeCM1BuildSession>\n <Project Name=\"T\">\n  <ComponentStream>\n   <List>\n{components}   </List>\n  </ComponentStream>\n </Project>\n</MoTeCM1BuildSession>\n"
+        )
+    }
+
+    fn findings_with_code(xml: &str, code: u32) -> Vec<Finding> {
+        validate(xml)
+            .expect("valid XML")
+            .into_iter()
+            .filter(|f| f.code == Some(code))
+            .collect()
+    }
+
+    #[test]
+    fn validate_rejects_invalid_project_envelopes() {
+        let wrong_root = validate("<?xml version=\"1.0\"?><NotAM1Project/>").unwrap();
+        assert!(wrong_root.iter().any(|f| {
+            f.level == FindingLevel::Error && f.message.contains("MoTeCM1BuildSession")
+        }));
+
+        for body in [
+            "<MoTeCM1BuildSession/>",
+            "<MoTeCM1BuildSession><Wrapper><Project/></Wrapper></MoTeCM1BuildSession>",
+            "<MoTeCM1BuildSession><Project/><Project/></MoTeCM1BuildSession>",
+        ] {
+            let findings = validate(body).unwrap();
+            assert!(
+                findings.iter().any(|f| f.level == FindingLevel::Error
+                    && f.message.contains("exactly one direct <Project> child")),
+                "invalid envelope accepted: {body}"
+            );
+        }
+
+        assert!(
+            validate("<MoTeCM1BuildSession><Project/></MoTeCM1BuildSession>")
+                .unwrap()
+                .iter()
+                .all(|f| !f.message.contains("document envelope"))
+        );
+    }
+
+    #[test]
+    fn validate_reports_conflicting_and_unsupported_tags() {
+        let xml = project_with_components(
+            r#"    <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+    <Component Classname="BuiltIn.Parameter" Name="Root.Bad Pin"><Props><List.UserTags><Entry Value="Pin"/></List.UserTags></Props></Component>
+    <Component Classname="BuiltIn.Channel" Name="Root.Bad Setup"><Props Security="Tune"><List.UserTags><Entry Value="Setup"/></List.UserTags></Props></Component>
+    <Component Classname="BuiltIn.Reference" Name="Root.Parameter Reference"><Props><List.UserTags><Entry Value="Pin"/></List.UserTags></Props></Component>
+    <Component Classname="BuiltIn.Parameter" Name="Root.Parameter Reference.Value"><Props/></Component>
+    <Component Classname="BuiltIn.Reference" Name="Root.Channel Reference"><Props><List.UserTags><Entry Value="Pin"/></List.UserTags></Props></Component>
+    <Component Classname="BuiltIn.Channel" Name="Root.Channel Reference.Value"><Props Security="Tune"/></Component>
+    <Component Classname="BuiltIn.Channel" Name="Root.Conflict"><Props Security="Tune"><List.UserTags><Entry Value="Normal"/><Entry Value="Diagnostic"/></List.UserTags></Props></Component>
+    <Component Classname="BuiltIn.Channel" Name="Root.Independent"><Props Security="Tune"><List.UserTags><Entry Value="Normal"/><Entry Value="Input"/></List.UserTags></Props></Component>
+"#,
+        );
+        let unsupported = findings_with_code(&xml, 1140);
+        assert_eq!(unsupported.len(), 3, "{unsupported:?}");
+        assert!(unsupported.iter().any(|f| f.path == "Root.Bad Pin"));
+        assert!(unsupported.iter().any(|f| f.path == "Root.Bad Setup"));
+        assert!(
+            unsupported
+                .iter()
+                .any(|f| f.path == "Root.Parameter Reference.Value")
+        );
+        assert!(
+            !unsupported
+                .iter()
+                .any(|f| f.path == "Root.Channel Reference.Value"),
+            "Pin is legal on the generated channel: {unsupported:?}"
+        );
+        assert!(
+            unsupported
+                .iter()
+                .all(|f| f.message.contains("legal tag set")),
+            "1140 guidance must suggest a complete legal set: {unsupported:?}"
+        );
+
+        let conflicts = findings_with_code(&xml, 1141);
+        assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+        assert_eq!(conflicts[0].path, "Root.Conflict");
+        assert!(conflicts[0].message.contains("Normal"));
+        assert!(conflicts[0].message.contains("Diagnostic"));
+        assert!(conflicts[0].message.contains("Type"));
+    }
+
+    #[test]
+    fn validate_reports_state_sensor_and_assigned_io_tag_requirements() {
+        let xml = project_with_components(
+            r#"    <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+    <Component Classname="BuiltIn.Channel" Name="Root.Mode.State"><Props Type="::This.Mode" Security="Tune"><List.UserTags><Entry Value="Diagnostic"/></List.UserTags></Props></Component>
+    <Component Classname="BuiltIn.Channel" Name="Root.State"><Props Type="f32" Security="Tune"/></Component>
+    <Component Classname="BuiltIn.Channel" Name="Root.Enum Value"><Props Type="::This.Mode" Security="Tune"/></Component>
+    <Component Classname="MoTeC Input.Sensor" Name="Root.Sensor"/>
+    <Component Classname="BuiltIn.Channel" Name="Root.Sensor.Value"><Props Security="Tune"><List.UserTags><Entry Value="Advanced"/></List.UserTags></Props></Component>
+    <Component Classname="BuiltIn.IOResourceValueInput" Name="Root.Input Resource"><Props NameCreation="AutoParam" NameTarget="This.Value"><List.UserTags><Entry Value="Setup"/></List.UserTags></Props></Component>
+    <Component Classname="BuiltIn.IOResourceValueOutput" Name="Root.Output Resource"><Props NameCreation="AutoParam" NameTarget="This.Value"><List.UserTags><Entry Value="Output"/></List.UserTags></Props></Component>
+    <Component Classname="BuiltIn.IOResourceValueInput" Name="Root.Unassigned Resource"/>
+"#,
+        );
+
+        let state = findings_with_code(&xml, 1647);
+        assert_eq!(
+            state.len(),
+            1,
+            "only enum-typed *.State must flag: {state:?}"
+        );
+        assert_eq!(state[0].path, "Root.Mode.State");
+        assert!(state[0].message.contains("replace"));
+
+        let io = findings_with_code(&xml, 1648);
+        assert_eq!(
+            io.len(),
+            2,
+            "both assigned resources are incomplete: {io:?}"
+        );
+        assert!(
+            io.iter().any(|f| {
+                f.path == "Root.Input Resource" && f.message.contains("Setup + Input")
+            })
+        );
+        assert!(
+            io.iter().any(|f| {
+                f.path == "Root.Output Resource" && f.message.contains("Setup + Output")
+            })
+        );
+        assert!(!io.iter().any(|f| f.path == "Root.Unassigned Resource"));
+
+        let sensor = findings_with_code(&xml, 1649);
+        assert_eq!(sensor.len(), 1, "{sensor:?}");
+        assert_eq!(sensor[0].path, "Root.Sensor.Value");
+        assert!(sensor[0].message.contains("replace"));
+    }
+
+    #[test]
+    fn mandatory_tags_match_known_1142_cases() {
+        let xml = project_with_components(
+            r#"    <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+    <Component Classname="BuiltIn.Channel" Name="Root.Channel"><Props Security="Tune"/></Component>
+    <Component Classname="BuiltIn.Parameter" Name="Root.Parameter"><Props Security="Tune"/></Component>
+    <Component Classname="BuiltIn.Table" Name="Root.Table"><Props Security="Tune"/></Component>
+    <Component Classname="BuiltIn.IOResourceValueInput" Name="Root.Assigned"><Props NameCreation="AutoParam" NameTarget="This.Value"/></Component>
+    <Component Classname="BuiltIn.IOResourceValueInput" Name="Root.Unassigned"/>
+"#,
+        );
+        let findings = mandatory_tag_findings(&xml).unwrap();
+        let paths: Vec<&str> = findings.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["Root.Assigned", "Root.Table"], "{findings:?}");
+        assert!(findings.iter().all(|f| {
+            f.level == FindingLevel::Warning
+                && f.code == Some(1142)
+                && !f.message.contains("heuristic")
+        }));
+    }
 
     /// Wrap a flat `<List>` of the given `Name`s in a minimal, valid project so the
     /// Check-12 findings can be exercised end-to-end through `validate`.

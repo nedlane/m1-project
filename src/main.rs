@@ -182,6 +182,17 @@ enum Command {
         #[arg(long, value_name = "TYPE")]
         r#type: String,
     },
+    /// Set a channel's storage class. Flash-backed values are committed only
+    /// when project code calls System.Preserve(), at no more than 1 Hz.
+    SetStorageClass {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        component: String,
+        /// `flash` persists through System.Preserve(); `volatile` clears persistence.
+        #[arg(long, value_parser = ["flash", "volatile"])]
+        storage_class: String,
+    },
     /// Change an existing BuiltIn.Constant's literal value (the M1-Build
     /// *Value* row, `<Props Value>`) — edits it in place, preserving the rest
     /// of the element (security, tags, comment), unlike delete-and-recreate.
@@ -315,11 +326,9 @@ enum Command {
         /// Emit JSON (array of objects with level/path/message) instead of text.
         #[arg(long)]
         json: bool,
-        /// Also run the opt-in mandatory-tag heuristic (M1-Build warning 1142):
-        /// flag value-bearing objects (Channel/Parameter/Table) that carry no user
-        /// tag. OFF by default — real projects carry hundreds of legitimately
-        /// untagged objects — and it only ever emits warnings, so it never changes
-        /// the exit code.
+        /// Also check known mandatory-Type-tag cases (M1-Build warning 1142):
+        /// tables and assigned IO-resource parameters. Ordinary untagged channels
+        /// and parameters are accepted. Warnings do not change the exit code.
         #[arg(long)]
         check_mandatory_tags: bool,
         /// Fail (error + exit 1) if the project's file format exceeds this version
@@ -375,6 +384,7 @@ impl Command {
             | Command::RenameComponent { project, .. }
             | Command::SetSecurity { project, .. }
             | Command::SetType { project, .. }
+            | Command::SetStorageClass { project, .. }
             | Command::SetValue { project, .. }
             | Command::SetUnit { project, .. }
             | Command::SetQuantity { project, .. }
@@ -472,9 +482,19 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             //     be internally consistent with the DBCRoot entry (#84).
             findings.extend(missing_code_findings(project, &xml));
             findings.extend(dbc_findings(project, &xml));
-            // Opt-in mandatory-tag heuristic (#85) — warnings only, off by default.
+            // Opt-in known mandatory-Type-tag cases — warnings only, off by default.
             if *check_mandatory_tags {
-                findings.extend(m1_project::mandatory_tag_findings(&xml).unwrap_or_default());
+                let existing_1648: std::collections::HashSet<String> = findings
+                    .iter()
+                    .filter(|finding| finding.code == Some(1648))
+                    .map(|finding| finding.path.clone())
+                    .collect();
+                findings.extend(
+                    m1_project::mandatory_tag_findings(&xml)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|finding| !existing_1648.contains(&finding.path)),
+                );
             }
             findings.sort_by(|a, b| a.path.cmp(&b.path).then(a.message.cmp(&b.message)));
             let errors = findings
@@ -542,6 +562,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     let ty_json = json_string_or_null(e.ty.as_deref());
                     let unit_json = json_string_or_null(e.unit.as_deref());
                     let sec_json = json_string_or_null(e.security.as_deref());
+                    let storage_json = json_string_or_null(e.storage_class.as_deref());
                     let cr_json = json_string_or_null(e.call_rate.as_deref());
                     let qty_json = json_string_or_null(e.qty.as_deref());
                     let tags_json = format!(
@@ -554,12 +575,13 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     );
                     let comment_json = json_string_or_null(e.comment.as_deref());
                     println!(
-                        "  {{\"path\":{},\"classname\":{},\"type\":{},\"unit\":{},\"security\":{},\"call_rate\":{},\"qty\":{},\"tags\":{},\"comment\":{}}}{}",
+                        "  {{\"path\":{},\"classname\":{},\"type\":{},\"unit\":{},\"security\":{},\"storage_class\":{},\"call_rate\":{},\"qty\":{},\"tags\":{},\"comment\":{}}}{}",
                         json_string(&e.path),
                         json_string(&e.classname),
                         ty_json,
                         unit_json,
                         sec_json,
+                        storage_json,
                         cr_json,
                         qty_json,
                         tags_json,
@@ -585,6 +607,9 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     }
                     if let Some(s) = &e.security {
                         props.push(format!("security={s}"));
+                    }
+                    if let Some(storage) = &e.storage_class {
+                        props.push(format!("storage_class={storage}"));
                     }
                     if let Some(q) = &e.qty {
                         props.push(format!("qty={q}"));
@@ -743,6 +768,11 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         SetType {
             component, r#type, ..
         } => m1_project::set_type(&xml, component, r#type)?,
+        SetStorageClass {
+            component,
+            storage_class,
+            ..
+        } => m1_project::set_storage_class(&xml, component, storage_class)?,
         SetValue {
             component, value, ..
         } => m1_project::set_value(&xml, component, value)?,

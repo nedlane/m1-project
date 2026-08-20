@@ -834,6 +834,85 @@ fn validate_json_emits_machine_findings() {
 }
 
 #[test]
+fn validate_cli_rejects_invalid_project_root() {
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("validate_invalid_root.m1prj");
+    std::fs::write(&path, "<?xml version=\"1.0\"?><NotAM1Project/>").unwrap();
+
+    let out = Command::new(bin)
+        .args(["validate", "--project"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("MoTeCM1BuildSession"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn set_storage_class_cli_supports_dry_run_and_json_readback() {
+    let bin = env!("CARGO_BIN_EXE_m1-project");
+    let path = tmp_path("set_storage_class.m1prj");
+    std::fs::write(&path, minimal_project()).unwrap();
+
+    let preview = Command::new(bin)
+        .args([
+            "--dry-run",
+            "set-storage-class",
+            "--component",
+            "Root.Engine.Speed",
+            "--storage-class",
+            "flash",
+            "--project",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    assert!(String::from_utf8_lossy(&preview.stdout).contains(r#"Storage="Flash""#));
+    assert!(
+        !std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("Storage=\"Flash\"")
+    );
+
+    let write = Command::new(bin)
+        .args([
+            "set-storage-class",
+            "--component",
+            "Root.Engine.Speed",
+            "--storage-class",
+            "flash",
+            "--project",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        write.status.success(),
+        "{}",
+        String::from_utf8_lossy(&write.stderr)
+    );
+
+    let listed = Command::new(bin)
+        .args(["list-components", "--json", "--project"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(stdout.contains(r#""storage_class":"flash""#), "{stdout}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn validate_json_emits_m1build_error_codes() {
     // The README markets `validate` as referencing M1-Build's error numbers; the
     // --json output must therefore carry a machine-readable `code` per finding so
