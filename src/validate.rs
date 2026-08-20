@@ -1133,6 +1133,68 @@ mod tests {
     }
 
     #[test]
+    fn validate_accepts_a_complete_assigned_input_resource_tag_set() {
+        let xml = project_with_components(
+            r#"    <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+    <Component Classname="BuiltIn.IOResourceValueInput" Name="Root.Input Resource"><Props NameCreation="AutoParam" NameTarget="This.Value"><List.UserTags><Entry Value="Setup"/><Entry Value="Input"/></List.UserTags></Props></Component>
+    <Component Classname="BuiltIn.IOResourceParameter" Name="Root.Input Resource.Value"><Props Security="Resource"/></Component>
+"#,
+        );
+
+        let tag_findings: Vec<_> = validate(&xml)
+            .expect("valid XML")
+            .into_iter()
+            .filter(|finding| matches!(finding.code, Some(1140 | 1648)))
+            .collect();
+        assert!(
+            tag_findings.is_empty(),
+            "Setup + Input is the complete legal assignment: {tag_findings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_resolves_inherited_tags_and_project_target_creation() {
+        let project = project_with_components(
+            r#"    <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+    <Component Classname="Test Module.Example" Name="Root.Example"/>
+    <Component Classname="BuiltIn.Reference" Name="Root.Example.Drive"><Props TargetCreation="AutoChannel" Target="This.Value"/></Component>
+    <Component Classname="BuiltIn.Reference" Name="Root.Example.Pin Choice"><Props TargetCreation="AutoParam" Target="This.Value"/></Component>
+"#,
+        );
+        let module = r#"<?xml version="1.0"?>
+<MoTecM1BuildModuleSet Name="Test Module">
+ <Modules><ModuleStream><List>
+  <Module Base="BuiltIn.GroupCompound" Name="Group.Example">
+   <ComponentStream><List>
+    <Component Classname="BuiltIn.GroupCompound" Name="Base"/>
+    <Component Classname="BuiltIn.Reference" Name="Base.Drive"><Props TargetCreation="AutoParam"><List.UserTags><Entry Value="Setup"/></List.UserTags></Props></Component>
+    <Component Classname="BuiltIn.Reference" Name="Base.Pin Choice"><Props TargetCreation="AutoChannel"><List.UserTags><Entry Value="Pin"/></List.UserTags></Props></Component>
+   </List></ComponentStream>
+  </Module>
+ </List></ModuleStream></Modules>
+</MoTecM1BuildModuleSet>"#;
+
+        let findings = validate_with_modules(&project, &[module]).expect("valid project and module");
+        let unsupported: Vec<_> = findings
+            .into_iter()
+            .filter(|finding| finding.code == Some(1140))
+            .collect();
+        assert_eq!(unsupported.len(), 2, "{unsupported:?}");
+        assert!(unsupported.iter().any(|finding| {
+            finding.path == "Root.Example.Drive.Value"
+                && finding.message.contains("Setup")
+                && finding.message.contains("BuiltIn.Channel")
+                && finding.message.contains("legal tag set Normal")
+        }));
+        assert!(unsupported.iter().any(|finding| {
+            finding.path == "Root.Example.Pin Choice.Value"
+                && finding.message.contains("Pin")
+                && finding.message.contains("BuiltIn.Parameter")
+                && finding.message.contains("legal tag set Setup")
+        }));
+    }
+
+    #[test]
     fn mandatory_tags_match_known_1142_cases() {
         let xml = project_with_components(
             r#"    <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
