@@ -200,6 +200,11 @@ pub fn resolve_reference(referrer: &str, value: &str) -> Option<String> {
         .rsplit_once('.')
         .map(|(g, _)| g)
         .unwrap_or(referrer);
+    resolve_reference_in_group(group, value)
+}
+
+/// Resolve a reference evaluated in a group's own scope, such as its DefValue.
+pub(crate) fn resolve_reference_in_group(group: &str, value: &str) -> Option<String> {
     if value == "This" {
         return Some(group.to_string());
     }

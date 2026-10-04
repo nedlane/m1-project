@@ -463,9 +463,10 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         } => {
             let (xml, _enc) = m1_workspace::read_text_with_encoding(project)
                 .map_err(|e| format!("{}: {e}", project.display()))?;
-            let module_xmls = selected_module_xmls(&xml, modules_dir)?;
-            let module_refs: Vec<&str> = module_xmls.iter().map(String::as_str).collect();
+            let modules = selected_module_xmls(&xml, modules_dir)?;
+            let module_refs: Vec<&str> = modules.xmls.iter().map(String::as_str).collect();
             let mut findings = m1_project::validate_with_modules(&xml, &module_refs)?;
+            findings.extend(modules.findings);
             // File-format gate (#): fail when the project's FileFormat exceeds the
             // team's pinned maximum — an accidental M1-Build upgrade the CI gate is
             // there to catch. A project-level finding (no component path), so it
@@ -891,10 +892,15 @@ fn missing_code_findings(project: &Path, xml: &str) -> Vec<m1_project::Finding> 
     out
 }
 
+struct SelectedModules {
+    xmls: Vec<String>,
+    findings: Vec<m1_project::Finding>,
+}
+
 fn selected_module_xmls(
     project_xml: &str,
     explicit_dirs: &[PathBuf],
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+) -> Result<SelectedModules, Box<dyn std::error::Error>> {
     let doc = roxmltree::Document::parse(project_xml)?;
     let selected: Vec<String> = doc
         .descendants()
@@ -912,19 +918,28 @@ fn selected_module_xmls(
 
     let search_dirs = module_search_dirs(explicit_dirs);
     let mut xmls = Vec::new();
+    let mut findings = Vec::new();
     for filename in selected {
         let Some(path) = search_dirs
             .iter()
             .map(|dir| dir.join(&filename))
             .find(|path| path.is_file())
         else {
+            findings.push(m1_project::Finding {
+                level: m1_project::FindingLevel::Warning,
+                path: "SelectedModuleSets".into(),
+                message: format!(
+                    "selected module metadata `{filename}` was not found; inherited tag and generated component checks are incomplete for this module. Supply metadata with --modules-dir or M1_MODULES_PATH. Library export ownership validation also remains limited"
+                ),
+                code: None,
+            });
             continue;
         };
         let xml = m1_workspace::read_text(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         xmls.push(xml);
     }
-    Ok(xmls)
+    Ok(SelectedModules { xmls, findings })
 }
 
 fn normalise_version_part(part: &str) -> &str {
