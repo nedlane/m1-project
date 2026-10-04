@@ -85,6 +85,7 @@ impl std::error::Error for EditError {}
 // ensure_props(...)?;`) would only make the lifetime tangle worse.
 mod edits;
 mod format;
+mod modules;
 mod query;
 mod validate;
 mod xml;
@@ -100,6 +101,7 @@ pub use format::{
     FormatReport, KNOWN_FORMATS, KnownFormat, convert_format, file_format, format_report,
     known_writers_summary,
 };
+pub use modules::{SelectedModules, selected_module_xmls};
 pub use query::{
     ComponentEntry, ScriptComponent, available_rates, list_components, resolve_trigger,
     script_components, security_groups,
