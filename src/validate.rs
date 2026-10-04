@@ -385,16 +385,29 @@ fn validate_with_catalog(
             code: None,
         });
     }
-    let class_by_path: std::collections::HashMap<String, String> = doc
-        .descendants()
-        .filter(is_real_component)
-        .filter_map(|node| {
-            Some((
-                node.attribute("Name")?.to_string(),
-                node.attribute("Classname")?.to_string(),
-            ))
-        })
-        .collect();
+    // A State group can expose an enum channel as its default value. DefValue
+    // is evaluated inside the group, unlike a channel's reference attributes.
+    // Resolve the configured target rather than assuming its name is Value.
+    let mut class_by_path: HashMap<String, String> = HashMap::new();
+    let mut state_default_paths = std::collections::HashSet::new();
+    for node in doc.descendants().filter(is_real_component) {
+        let Some(name) = node.attribute("Name") else {
+            continue;
+        };
+        let classname = node
+            .attribute("Classname")
+            .expect("is_real_component checked Classname");
+        class_by_path.insert(name.to_string(), classname.to_string());
+        if classname == "BuiltIn.GroupCompound"
+            && name.rsplit('.').next() == Some("State")
+            && let Some(props) = node.children().find(|child| child.has_tag_name("Props"))
+            && props.attribute("UseDefValue") == Some("true")
+            && let Some(reference) = props.attribute("DefValue")
+            && let Some(path) = crate::query::resolve_reference_in_group(name, reference)
+        {
+            state_default_paths.insert(path);
+        }
+    }
 
     // The project's declared security groups, if it declares any (Check 7).
     // `None` => no <SecurityMgr> (Automatic security mode) => skip the check.
@@ -567,7 +580,7 @@ fn validate_with_catalog(
         }
 
         if classname == "BuiltIn.Channel"
-            && nm.rsplit('.').next() == Some("State")
+            && (nm.rsplit('.').next() == Some("State") || state_default_paths.contains(nm))
             && is_enum_type(props.and_then(|p| p.attribute("Type")))
             && !has_tag(&tags, "Normal")
         {
@@ -1243,6 +1256,65 @@ mod tests {
         assert!(conflicts[0].message.contains("Normal"));
         assert!(conflicts[0].message.contains("Diagnostic"));
         assert!(conflicts[0].message.contains("Type"));
+    }
+
+    #[test]
+    fn validate_reports_enum_state_group_default_tags() {
+        for reference in ["This.Value", "Root.Example.State.Value"] {
+            let xml = project_with_components(&format!(
+                r#"<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.Example"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.Example.State"><Props UseDefValue="true" DefValue="{reference}"/></Component>
+<Component Classname="BuiltIn.Channel" Name="Root.Example.State.Value"><Props Type="::This.Example State" Security="Tune"><List.UserTags><Entry Value="Diagnostic"/></List.UserTags></Props></Component>"#,
+            ));
+            let findings = findings_with_code(&xml, 1647);
+            assert_eq!(findings.len(), 1, "{reference}: {findings:?}");
+            assert_eq!(findings[0].path, "Root.Example.State.Value");
+            assert!(findings[0].message.contains("replace"));
+        }
+    }
+
+    #[test]
+    fn validate_resolves_state_default_from_group_scope() {
+        let xml = project_with_components(
+            r#"<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.Example"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.Example.State"><Props UseDefValue="true" DefValue="Parent.Mode"/></Component>
+<Component Classname="BuiltIn.Channel" Name="Root.Example.Mode"><Props Type="::This.Example State" Security="Tune"/></Component>
+<Component Classname="BuiltIn.Channel" Name="Root.Mode"><Props Type="::This.Example State" Security="Tune"/></Component>"#,
+        );
+        let findings = findings_with_code(&xml, 1647);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].path, "Root.Example.Mode");
+    }
+
+    #[test]
+    fn validate_state_default_tags_excludes_inactive_and_normal_values() {
+        for (enabled, target_class, target_type, target_tag) in [
+            ("false", "BuiltIn.Channel", "::This.Mode", "Diagnostic"),
+            ("true", "BuiltIn.Parameter", "::This.Mode", "Diagnostic"),
+            ("true", "BuiltIn.Channel", "f32", "Diagnostic"),
+            ("true", "BuiltIn.Channel", "::This.Mode", "Normal"),
+        ] {
+            let xml = project_with_components(&format!(
+                r#"<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.State"><Props UseDefValue="{enabled}" DefValue="This.Value"/></Component>
+<Component Classname="{target_class}" Name="Root.State.Value"><Props Type="{target_type}" Security="Tune"><List.UserTags><Entry Value="{target_tag}"/></List.UserTags></Props></Component>"#,
+            ));
+            assert!(findings_with_code(&xml, 1647).is_empty(), "{xml}");
+        }
+        for props in [
+            r#"DefValue="This.Value""#,
+            r#"UseDefValue="true""#,
+            r#"UseDefValue="true" DefValue="This.Missing""#,
+        ] {
+            let xml = project_with_components(&format!(
+                r#"<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.State"><Props {props}/></Component>
+<Component Classname="BuiltIn.Channel" Name="Root.State.Value"><Props Type="::This.Mode" Security="Tune"/></Component>"#,
+            ));
+            assert!(findings_with_code(&xml, 1647).is_empty(), "{xml}");
+        }
     }
 
     #[test]

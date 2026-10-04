@@ -201,6 +201,93 @@ fn validate_loads_selected_module_metadata_for_inherited_tags() {
 }
 
 #[test]
+fn validate_warns_when_selected_module_metadata_is_unavailable() {
+    let root = tmp_path("missing_selected_module");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("modules")).unwrap();
+    let project = r#"<MoTeCM1BuildSession><Project Name="T">
+<SelectedModuleSets><File Name="Test Module" VersionMajor="1" VersionMinor="02" VersionBuild="0003"/></SelectedModuleSets>
+<ComponentStream><List><Component Classname="BuiltIn.GroupCompound" Name="Root"/></List></ComponentStream>
+</Project></MoTeCM1BuildSession>"#;
+    std::fs::write(root.join("Project.m1prj"), project).unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_m1-project"))
+            .args(["validate", "--json", "--project"])
+            .arg(root.join("Project.m1prj"))
+            .args(["--modules-dir"])
+            .arg(root.join("modules"))
+            .output()
+            .unwrap()
+    };
+    let out = run();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "coverage warnings keep exit 0: {stdout}"
+    );
+    serde_json_sanity(&stdout);
+    assert!(stdout.contains(r#""level":"warning""#), "{stdout}");
+    assert!(stdout.contains("Test Module.1.2.3.m1mod"), "{stdout}");
+    assert!(stdout.contains("checks are incomplete"), "{stdout}");
+    assert!(stdout.contains("--modules-dir"), "{stdout}");
+    assert!(
+        stdout.contains("export ownership validation also remains limited"),
+        "{stdout}"
+    );
+
+    std::fs::write(
+        root.join("modules/Test Module.1.2.3.m1mod"),
+        r#"<MoTecM1BuildModuleSet Name="Test Module"><Modules/></MoTecM1BuildModuleSet>"#,
+    )
+    .unwrap();
+    let available = run();
+    assert!(available.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&available.stdout)
+            .split_whitespace()
+            .collect::<String>(),
+        "[]"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn validate_reports_state_group_default_with_and_without_mandatory_tags() {
+    let path = tmp_path("state_group_default.m1prj");
+    std::fs::write(
+        &path,
+        r#"<MoTeCM1BuildSession><Project Name="T"><ComponentStream><List>
+<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.Example"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.Example.State"><Props UseDefValue="true" DefValue="This.Value"/></Component>
+<Component Classname="BuiltIn.Channel" Name="Root.Example.State.Value"><Props Type="::This.Example State" Security="Tune"><List.UserTags><Entry Value="Diagnostic"/></List.UserTags></Props></Component>
+</List></ComponentStream></Project></MoTeCM1BuildSession>"#,
+    )
+    .unwrap();
+    for mandatory in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_m1-project"));
+        command.args(["validate", "--json", "--project"]).arg(&path);
+        if mandatory {
+            command.arg("--check-mandatory-tags");
+        }
+        let out = command.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "warnings keep exit 0: {stdout}");
+        serde_json_sanity(&stdout);
+        assert_eq!(stdout.matches(r#""code":1647"#).count(), 1, "{stdout}");
+        assert!(
+            stdout.contains(r#""path":"Root.Example.State.Value""#),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("replace the existing Type tag with Normal"),
+            "{stdout}"
+        );
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn missing_project_error_names_the_file() {
     let out = Command::new(env!("CARGO_BIN_EXE_m1-project"))
         .args(["list-rates", "--project", "/no/such/dir/Project.m1prj"])

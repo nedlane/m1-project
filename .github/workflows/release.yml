@@ -179,6 +179,7 @@ jobs:
             gh release upload "$TAG" out/* --clobber --repo "$GITHUB_REPOSITORY"
           else
             gh release create "$TAG" out/* \
+              --target "$GITHUB_SHA" \
               --repo "$GITHUB_REPOSITORY" \
               --title "m1-project $TAG" \
               --notes-file body.md

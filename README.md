@@ -89,11 +89,21 @@ and flags:
   identify one file unambiguously. Module-inherited tag checks load the
   project's exact selected `.m1mod` versions from `--modules-dir`,
   `M1_MODULES_PATH`, or the standard Windows/WSL M1-Build installation. If
-  module files are unavailable, project-local checks still run without guessing
-  at proprietary module metadata. `list-rates` and `list-security` expose the
+  module files are unavailable, project-local checks still run and a warning
+  identifies the missing metadata and incomplete inherited checks. Warnings
+  preserve exit status 0; library export ownership validation remains limited
+  even when metadata is supplied. Enum channels exposed as an enabled State
+  group's default value receive the same Normal-tag check (warning `1647`) as
+  directly named State channels. `list-rates` and `list-security` expose the
   project's valid call-rate clocks and security groups (both project-specific —
   a project may declare custom security groups inline) so an editor can offer a
   picker that always matches what `set-call-rate` / `set-security` will accept.
+
+Library consumers can use `selected_module_xmls` to share the CLI's exact-version
+module discovery and coverage findings, then pass the loaded XML to
+`validate_with_modules`. Missing, unreadable, malformed or mismatched module
+definitions are skipped with warnings; malformed project XML remains an error.
+An unavailable selected version never falls back to another installed version.
 
 Flash-backed channels persist only when reachable project code calls
 `System.Preserve()`. Keep that call at 1 Hz or slower. `m1-typecheck` reports

@@ -134,7 +134,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "m1-project"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "clap",
  "m1-workspace",
@@ -143,8 +143,8 @@ dependencies = [
 
 [[package]]
 name = "m1-workspace"
-version = "0.14.0"
-source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.14.0#b9ca8691ff203fe5fc5f5d5fff57c09b9f0b08fe"
+version = "0.14.1"
+source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.14.1#635e81a29fcb4b998af7c2097e8262c741f4f547"
 dependencies = [
  "serde",
  "serde_ignored",
