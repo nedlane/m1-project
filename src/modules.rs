@@ -249,7 +249,6 @@ mod tests {
                 .xmls
                 .is_empty()
         );
-        std::fs::write(&selected, r#"<MoTecM1BuildModuleSet Name="Test Module" VersionMajor="1" VersionMinor="2" VersionBuild="3"/>"#).unwrap();
         std::fs::write(&selected, "<broken>").unwrap();
         let malformed = selected_module_xmls(project, std::slice::from_ref(&dir))
             .unwrap()
@@ -269,6 +268,17 @@ mod tests {
                 .xmls
                 .is_empty()
         );
+        // An empty declared field must not normalize to the selected zero.
+        let zero_project = project.replace("VersionBuild=\"0003\"", "VersionBuild=\"0\"");
+        std::fs::write(
+            dir.join("Test Module.1.2.0.m1mod"),
+            r#"<MoTecM1BuildModuleSet Name="Test Module" VersionBuild=""/>"#,
+        )
+        .unwrap();
+        let empty_version =
+            selected_module_xmls(&zero_project, std::slice::from_ref(&dir)).unwrap();
+        assert!(empty_version.xmls.is_empty());
+        assert_eq!(empty_version.findings.len(), 1);
         std::fs::write(&selected, r#"<MoTecM1BuildModuleSet Name="Test Module" VersionMajor="1" VersionMinor="2" VersionBuild="3"/>"#).unwrap();
         let matched = selected_module_xmls(project, std::slice::from_ref(&dir)).unwrap();
         assert_eq!(matched.xmls.len(), 1);
