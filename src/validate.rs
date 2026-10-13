@@ -434,6 +434,7 @@ fn validate_with_catalog(
     // Components that declare their own tag list; a generated `.Value` with
     // its own tags is judged on them, not on its Reference/resource's tags.
     let mut own_tag_paths = std::collections::HashSet::new();
+    let mut own_tags_by_path = HashMap::new();
     for node in doc.descendants().filter(is_real_component) {
         let Some(name) = node.attribute("Name") else {
             continue;
@@ -444,6 +445,7 @@ fn validate_with_catalog(
         class_by_path.insert(name.to_string(), classname.to_string());
         if component_overrides_tags(node) {
             own_tag_paths.insert(name.to_string());
+            own_tags_by_path.insert(name.to_string(), component_tags(node));
         }
         if classname == "BuiltIn.GroupCompound"
             && name.rsplit('.').next() == Some("State")
@@ -599,6 +601,10 @@ fn validate_with_catalog(
         } else {
             effective_classname
         };
+        let io_tags = own_tags_by_path.get(effective_path).unwrap_or(&tags);
+        let io_conflicted = [SYSTEM_TAGS, TYPE_TAGS, IO_TAGS]
+            .iter()
+            .any(|group| tags_in_group(io_tags, group).len() > 1);
         let illegal = match effective_classname {
             "BuiltIn.Channel" => first_tag_in(&tags, TUNABLE_ONLY_TAGS).map(|tag| (tag, "Normal")),
             "BuiltIn.Parameter" | "BuiltIn.IOResourceParameter" => {
@@ -626,9 +632,11 @@ fn validate_with_catalog(
                 code: Some(1140),
             });
         } else if assigned_io
-            && !conflicted
-            && !tags_in_group(&tags, TYPE_TAGS).is_empty()
-            && !(has_tag(&tags, "Setup") && (has_tag(&tags, "Input") || has_tag(&tags, "Output")))
+            && !io_conflicted
+            && first_tag_in(io_tags, CHANNEL_ONLY_TAGS).is_none()
+            && !tags_in_group(io_tags, TYPE_TAGS).is_empty()
+            && !(has_tag(io_tags, "Setup")
+                && (has_tag(io_tags, "Input") || has_tag(io_tags, "Output")))
         {
             // Without any Type tag M1 Build reports the mandatory tag (1142)
             // instead; either IO tag satisfies the requirement.
