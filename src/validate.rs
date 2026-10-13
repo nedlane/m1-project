@@ -197,16 +197,16 @@ fn default_value_object(
         crate::query::resolve_reference_in_group(path, &reference)
     };
     let mut current = default_of(owner)?;
-    for _ in 0..4 {
-        if !class_by_path.contains_key(&current) {
+    let mut visited = std::collections::HashSet::from([owner.to_string()]);
+    loop {
+        if !visited.insert(current.clone()) || !class_by_path.contains_key(&current) {
             return None;
         }
         match default_of(&current) {
-            Some(next) if next != current => current = next,
+            Some(next) => current = next,
             _ => return Some(current),
         }
     }
-    Some(current)
 }
 
 fn is_assigned_io_resource(classname: &str, props: Option<roxmltree::Node<'_, '_>>) -> bool {
