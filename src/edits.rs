@@ -449,17 +449,19 @@ pub fn delete_component(
         let Some(props) = n.children().find(|c| c.has_tag_name("Props")) else {
             continue;
         };
-        for attr in crate::query::REFERENCE_ATTRS {
-            let Some(v) = props.attribute(attr) else {
-                continue;
-            };
-            if v.starts_with("$(") {
-                continue;
-            }
-            if let Some(abs) = crate::query::resolve_reference(owner, v)
-                && crate::query::reference_resolves(&abs, |p| deleted_names.contains(p))
-            {
-                referencing.push(format!("{owner} ({attr})"));
+        for node in crate::query::reference_nodes(props) {
+            for attr in crate::query::REFERENCE_ATTRS {
+                let Some(v) = node.attribute(attr) else {
+                    continue;
+                };
+                if v.starts_with("$(") {
+                    continue;
+                }
+                if let Some(abs) = crate::query::resolve_node_reference(owner, node, v)
+                    && crate::query::reference_resolves(&abs, |p| deleted_names.contains(p))
+                {
+                    referencing.push(format!("{owner} ({attr})"));
+                }
             }
         }
     }
@@ -693,14 +695,8 @@ pub fn rename_component(
         result = apply_splices_desc(result, trigger_fixes);
     }
 
-    // Pass 2b: rewrite table Axis `Source` / Reference `Target` / `NameTarget`
-    // references that point INTO the renamed subtree from OUTSIDE it. A relative
-    // reference wholly within the renamed subtree auto-follows the rename (both
-    // referrer and target move together), so only a cross-boundary reference
-    // needs updating — and its anchor base (the un-renamed referrer's group) is
-    // then unchanged, so only the target tail changes. Without this, renaming a
-    // channel used as a table axis or reference target left a dangling reference
-    // (M1-Build Error 1338) that Check 9 now also catches.
+    // Pass 2b: keep reference targets aligned with renamed components, including
+    // nested table axes and absolute references inside the renamed subtree.
     {
         let doc = parse_xml(&result)?;
         let mut ref_fixes: Vec<(std::ops::Range<usize>, String)> = Vec::new();
@@ -713,44 +709,52 @@ pub fn rename_component(
                 .find(|(_, new)| new == owner_new)
                 .map(|(old, _)| old.as_str())
                 .unwrap_or(owner_new);
-            // A referrer inside the renamed subtree keeps its relative reference.
-            if owner_old == old_name || owner_old.starts_with(&old_prefix) {
-                continue;
-            }
             let Some(props) = n.children().find(|c| c.has_tag_name("Props")) else {
                 continue;
             };
-            for attr in crate::query::REFERENCE_ATTRS {
-                let Some(ra) = props.attribute_node(attr) else {
-                    continue;
-                };
-                let value = props.attribute(attr).unwrap();
-                if value.starts_with("$(") {
-                    continue;
+            for node in crate::query::reference_nodes(props) {
+                for attr in crate::query::REFERENCE_ATTRS {
+                    let Some(ra) = node.attribute_node(attr) else {
+                        continue;
+                    };
+                    let value = ra.value();
+                    if value.starts_with("$(") {
+                        continue;
+                    }
+                    let Some(abs) = crate::query::resolve_node_reference(owner_old, node, value)
+                    else {
+                        continue;
+                    };
+                    let new_abs = if abs == old_name {
+                        new_name.clone()
+                    } else if let Some(rest) = abs.strip_prefix(&old_prefix) {
+                        format!("{new_name}.{rest}")
+                    } else {
+                        continue;
+                    };
+                    let (anchor, _) = split_anchor(value);
+                    let new_value = if anchor.is_empty() {
+                        new_abs.clone()
+                    } else {
+                        let base = crate::query::resolve_node_reference(
+                            owner_new,
+                            node,
+                            anchor.trim_end_matches('.'),
+                        )
+                        .unwrap_or_default();
+                        let base = base.trim_end_matches('.');
+                        if new_abs == base {
+                            anchor.trim_end_matches('.').to_string()
+                        } else if let Some(tail) = new_abs.strip_prefix(&format!("{base}.")) {
+                            format!("{}.{tail}", anchor.trim_end_matches('.'))
+                        } else {
+                            new_abs.clone()
+                        }
+                    };
+                    if new_value != value {
+                        ref_fixes.push((ra.range_value(), xml_escape(&new_value)));
+                    }
                 }
-                let Some(abs) = crate::query::resolve_reference(owner_old, value) else {
-                    continue;
-                };
-                let new_abs = if abs == old_name {
-                    new_name.clone()
-                } else if let Some(rest) = abs.strip_prefix(&old_prefix) {
-                    format!("{new_name}.{rest}")
-                } else {
-                    continue; // target not in the renamed subtree
-                };
-                // Keep the anchor; recompute the tail below the (unchanged) base.
-                let (anchor, tail) = split_anchor(value);
-                let new_value = if anchor.is_empty() {
-                    new_abs.clone() // absolute reference
-                } else {
-                    let base = abs.strip_suffix(tail).unwrap_or("").trim_end_matches('.');
-                    let new_tail = new_abs
-                        .strip_prefix(base)
-                        .unwrap_or(&new_abs)
-                        .trim_start_matches('.');
-                    format!("{anchor}{new_tail}")
-                };
-                ref_fixes.push((ra.range_value(), xml_escape(&new_value)));
             }
         }
         result = apply_splices_desc(result, ref_fixes);
