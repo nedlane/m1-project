@@ -92,9 +92,19 @@ and flags:
   module files are unavailable, project-local checks still run and a warning
   identifies the missing metadata and incomplete inherited checks. Warnings
   preserve exit status 0; library export ownership validation remains limited
-  even when metadata is supplied. Enum channels exposed as an enabled State
-  group's default value receive the same Normal-tag check (warning `1647`) as
-  directly named State channels. `list-rates` and `list-security` expose the
+  even when metadata is supplied. Tag checks follow M1-Build's object kinds:
+  Normal, Diagnostic, Advanced and Pin belong on channels, while Setup and
+  Tune belong on parameters and assigned IO resources (warning `1140`); IO
+  characteristics, IO methods and unassigned resources are not judged. A
+  tag conflict (`1141`) replaces the other tag findings for that object. A
+  State channel, or a State group's default value, that carries a Type tag
+  other than Normal gets warning `1647`; an untagged one only lacks its
+  mandatory Type tag. An assigned IO resource with Setup needs Input or
+  Output (`1648`). A group containing an object named `Sensor` needs a
+  Normal-tagged default value (`1649`), following object and module-class
+  defaults. `--check-mandatory-tags` reports `1142` for plain channels,
+  parameters and tables with no Type tag of their own or from an ancestor,
+  and for untagged assigned IO resources. `list-rates` and `list-security` expose the
   project's valid call-rate clocks and security groups (both project-specific —
   a project may declare custom security groups inline) so an editor can offer a
   picker that always matches what `set-call-rate` / `set-security` will accept.

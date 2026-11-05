@@ -280,7 +280,7 @@ fn validate_reports_state_group_default_with_and_without_mandatory_tags() {
             "{stdout}"
         );
         assert!(
-            stdout.contains("replace the existing Type tag with Normal"),
+            stdout.contains("replace its other Type tag with Normal"),
             "{stdout}"
         );
     }
