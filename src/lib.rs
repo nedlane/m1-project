@@ -2257,7 +2257,7 @@ mod tests {
     }
 
     #[test]
-    fn mandatory_tag_findings_flags_tables_not_ordinary_values() {
+    fn mandatory_tag_findings_flags_untagged_plain_values() {
         let prj = r#"<?xml version="1.0"?>
 <MoTeCM1BuildSession>
  <Project Name="T">
@@ -2279,12 +2279,13 @@ mod tests {
                 .iter()
                 .all(|f| f.level == FindingLevel::Warning && f.code == Some(1142))
         );
-        assert!(findings.iter().any(|f| f.path == "Root.Untagged Table"));
-        assert!(
-            !findings
-                .iter()
-                .any(|f| matches!(f.path.as_str(), "Root.Untagged" | "Root.Tagged")),
-            "ordinary channels must not be flagged: {findings:?}"
+        // M1 Build requires a Type tag on plain channels and tables; an IO
+        // tag alone does not satisfy it.
+        let paths: Vec<&str> = findings.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["Root.Tagged", "Root.Untagged", "Root.Untagged Table"],
+            "{findings:?}"
         );
         // The GroupCompound is not a value object — not flagged.
         assert!(!findings.iter().any(|f| f.path == "Root"));
