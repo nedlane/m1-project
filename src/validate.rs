@@ -269,7 +269,7 @@ const RESERVED_NAME_WORDS: &[&str] = &[
 /// callers split on `.` and check each segment. Empty / whitespace-only segments are
 /// the concern of the blank-name check (Check 8) and return `None` here so the two
 /// checks do not both fire on the same object.
-fn invalid_name_segment_reason(segment: &str) -> Option<String> {
+pub(crate) fn invalid_name_segment_reason(segment: &str) -> Option<String> {
     // Blank / whitespace-only is Check 8's territory; don't double-report.
     if segment.trim().is_empty() {
         return None;
@@ -429,7 +429,7 @@ fn validate_with_catalog(
     // complete, so it runs after the pass.
     let mut triggered: Vec<(String, String)> = Vec::new();
     // (owner, attr, value) for the reference-resolution check (Check 9).
-    let mut references: Vec<(String, &'static str, String)> = Vec::new();
+    let mut references: Vec<(String, &'static str, String, String)> = Vec::new();
     let mut org_roots: Vec<roxmltree::Node> = Vec::new();
     // DBCRoot module entries (`<Component Classname="BuiltIn.CAN.DBC" MD5=…
     // Name="DBC.<module>">`) for the DBC hash checks (Check 10) and the
@@ -649,9 +649,16 @@ fn validate_with_catalog(
         // Component references (table Axis Source, Reference Target, NameTarget)
         // for Check 9.
         if let Some(p) = props {
-            for attr in crate::query::REFERENCE_ATTRS {
-                if let Some(v) = p.attribute(attr) {
-                    references.push((nm.to_string(), attr, v.to_string()));
+            for node in crate::query::reference_nodes(p) {
+                for attr in crate::query::REFERENCE_ATTRS {
+                    if let Some(v) = node.attribute(attr) {
+                        references.push((
+                            nm.to_string(),
+                            attr,
+                            v.to_string(),
+                            crate::query::reference_scope(nm, node).to_string(),
+                        ));
+                    }
                 }
             }
         }
@@ -811,11 +818,11 @@ fn validate_with_catalog(
     // so the toolchain could both create and certify a broken project. Verified
     // false-positive-free on the real corpora (every EV-M1/AV-M1 reference
     // resolves). A `$(…)` template is dynamic and skipped.
-    for (owner, attr, value) in &references {
+    for (owner, attr, value, scope) in &references {
         if value.starts_with("$(") {
             continue;
         }
-        match crate::query::resolve_reference(owner, value) {
+        match crate::query::resolve_reference_in_group(scope, value) {
             None => findings.push(Finding {
                 level: FindingLevel::Error,
                 path: owner.clone(),

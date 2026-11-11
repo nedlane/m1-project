@@ -109,6 +109,17 @@ Flash-backed channels persist only when reachable project code calls
 `System.Preserve()`. Keep that call at 1 Hz or slower. `m1-typecheck` reports
 flash-backed projects that have no reachable preserve call.
 
+Backing-script edits use the component's actual `Filename`. They refuse paths
+outside the flat `Scripts/` directory, Windows device names, symlinked script
+files or a symlinked `Scripts/` directory, and a file shared by multiple
+components. Existing regular script files are preserved on creation.
+
+Write-back follows an explicit UTF-8 or Windows-1252 XML declaration, including
+whitespace around `encoding =`. An absent declaration keeps the M1-Build
+Windows-1252 convention; other declared encodings are refused. Format conversion
+requires the supported multiline signature and CDATA description layout.
+Unsupported layouts return an error before the project is written.
+
 Global flags: `--dry-run` previews the edit as a unified diff (and reports the
 side effects it would perform, like script renames) while `--stdout` prints
 the resulting XML for piping — neither touches any file. Without either, the

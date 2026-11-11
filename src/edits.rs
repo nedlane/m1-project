@@ -296,6 +296,7 @@ pub fn create_group(xml: &str, name: &str) -> Result<String, EditError> {
 /// self-closing.
 pub fn create_scheduled_function(xml: &str, name: &str) -> Result<String, EditError> {
     validate_name_segment(name)?;
+    validate_script_filename(&script_relpath(name))?;
     let attrs = format!(" Filename=\"{}\"", xml_escape(&script_relpath(name)));
     insert_component(xml, name, "BuiltIn.FuncUser", &attrs, |_| None)
 }
@@ -305,6 +306,7 @@ pub fn create_scheduled_function(xml: &str, name: &str) -> Result<String, EditEr
 /// M1-Build writes for a new parametric function.
 pub fn create_function(xml: &str, name: &str) -> Result<String, EditError> {
     validate_name_segment(name)?;
+    validate_script_filename(&script_relpath(name))?;
     let attrs = format!(" Filename=\"{}\"", xml_escape(&script_relpath(name)));
     insert_component(xml, name, "BuiltIn.FuncUserParam", &attrs, |indent| {
         // Byte-for-byte the empty signature M1-Build emits; the CDATA lines sit at
@@ -449,14 +451,16 @@ pub fn delete_component(
         let Some(props) = n.children().find(|c| c.has_tag_name("Props")) else {
             continue;
         };
-        for attr in crate::query::REFERENCE_ATTRS {
-            let Some(v) = props.attribute(attr) else {
+        for (node, attr) in crate::query::reference_nodes(props)
+            .flat_map(|node| crate::query::REFERENCE_ATTRS.map(|attr| (node, attr)))
+        {
+            let Some(v) = node.attribute(attr) else {
                 continue;
             };
             if v.starts_with("$(") {
                 continue;
             }
-            if let Some(abs) = crate::query::resolve_reference(owner, v)
+            if let Some(abs) = crate::query::resolve_node_reference(owner, node, v)
                 && crate::query::reference_resolves(&abs, |p| deleted_names.contains(p))
             {
                 referencing.push(format!("{owner} ({attr})"));
@@ -598,24 +602,51 @@ pub fn rename_component(
 
     // Backing-script files M1-Build renames on disk: each renamed FuncUser/
     // FuncUserParam (or legacy MethodUser) maps its old → new `.m1scr` path.
-    let script_renames: Vec<ScriptRename> = to_rename
-        .iter()
-        .filter(|(old, _)| {
-            doc.descendants()
-                .filter(is_real_component)
-                .find(|n| n.attribute("Name") == Some(old.as_str()))
-                .map(|n| {
-                    n.attribute("Classname")
-                        .map(|c| c.contains("FuncUser") || c.contains("MethodUser"))
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false)
-        })
-        .map(|(old, new)| ScriptRename {
-            old: script_relpath(old),
-            new: script_relpath(new),
-        })
-        .collect();
+    let mut script_renames = Vec::new();
+    let mut script_owners = std::collections::HashSet::new();
+    for (old, new) in &to_rename {
+        let Some(node) = doc
+            .descendants()
+            .filter(is_real_component)
+            .find(|n| n.attribute("Name") == Some(old.as_str()))
+        else {
+            continue;
+        };
+        if !node
+            .attribute("Classname")
+            .is_some_and(|c| c.contains("FuncUser") || c.contains("MethodUser"))
+        {
+            continue;
+        }
+        let old_path = node
+            .attribute("Filename")
+            .map(str::to_owned)
+            .unwrap_or_else(|| script_relpath(old));
+        let new_path = script_relpath(new);
+        validate_script_filename(&old_path)?;
+        validate_script_filename(&new_path)?;
+        script_renames.push(ScriptRename {
+            old: old_path,
+            new: new_path,
+        });
+        script_owners.insert(new.as_str());
+    }
+
+    // A file shared with another component cannot move independently.
+    let all_scripts = crate::query::script_components(xml)?;
+    for rename in &script_renames {
+        if all_scripts
+            .iter()
+            .filter(|script| script.filename == rename.old)
+            .count()
+            > 1
+        {
+            return Err(EditError::Invalid(format!(
+                "backing script `{}` is shared by multiple components; refusing to disconnect them",
+                rename.old
+            )));
+        }
+    }
 
     // Now rewrite the XML.  We collect all Name attribute value ranges plus all
     // SelectedTrigger value ranges that need rewriting, then apply the splices
@@ -693,17 +724,11 @@ pub fn rename_component(
         result = apply_splices_desc(result, trigger_fixes);
     }
 
-    // Pass 2b: rewrite table Axis `Source` / Reference `Target` / `NameTarget`
-    // references that point INTO the renamed subtree from OUTSIDE it. A relative
-    // reference wholly within the renamed subtree auto-follows the rename (both
-    // referrer and target move together), so only a cross-boundary reference
-    // needs updating — and its anchor base (the un-renamed referrer's group) is
-    // then unchanged, so only the target tail changes. Without this, renaming a
-    // channel used as a table axis or reference target left a dangling reference
-    // (M1-Build Error 1338) that Check 9 now also catches.
+    // Rewrite references in the owner's old scope, preserving anchors whenever
+    // they still resolve to the intended target after the move.
     {
         let doc = parse_xml(&result)?;
-        let mut ref_fixes: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+        let mut ref_fixes = Vec::new();
         for n in doc.descendants().filter(is_real_component) {
             let Some(owner_new) = n.attribute("Name") else {
                 continue;
@@ -713,22 +738,20 @@ pub fn rename_component(
                 .find(|(_, new)| new == owner_new)
                 .map(|(old, _)| old.as_str())
                 .unwrap_or(owner_new);
-            // A referrer inside the renamed subtree keeps its relative reference.
-            if owner_old == old_name || owner_old.starts_with(&old_prefix) {
-                continue;
-            }
             let Some(props) = n.children().find(|c| c.has_tag_name("Props")) else {
                 continue;
             };
-            for attr in crate::query::REFERENCE_ATTRS {
-                let Some(ra) = props.attribute_node(attr) else {
+            for (node, attr) in crate::query::reference_nodes(props)
+                .flat_map(|node| crate::query::REFERENCE_ATTRS.map(|attr| (node, attr)))
+            {
+                let Some(ra) = node.attribute_node(attr) else {
                     continue;
                 };
-                let value = props.attribute(attr).unwrap();
+                let value = ra.value();
                 if value.starts_with("$(") {
                     continue;
                 }
-                let Some(abs) = crate::query::resolve_reference(owner_old, value) else {
+                let Some(abs) = crate::query::resolve_node_reference(owner_old, node, value) else {
                     continue;
                 };
                 let new_abs = if abs == old_name {
@@ -736,19 +759,28 @@ pub fn rename_component(
                 } else if let Some(rest) = abs.strip_prefix(&old_prefix) {
                     format!("{new_name}.{rest}")
                 } else {
-                    continue; // target not in the renamed subtree
+                    abs
                 };
-                // Keep the anchor; recompute the tail below the (unchanged) base.
-                let (anchor, tail) = split_anchor(value);
+                if crate::query::resolve_node_reference(owner_new, node, value).as_deref()
+                    == Some(&new_abs)
+                {
+                    continue;
+                }
+                let (anchor, _) = split_anchor(value);
                 let new_value = if anchor.is_empty() {
-                    new_abs.clone() // absolute reference
+                    new_abs
                 } else {
-                    let base = abs.strip_suffix(tail).unwrap_or("").trim_end_matches('.');
-                    let new_tail = new_abs
-                        .strip_prefix(base)
-                        .unwrap_or(&new_abs)
-                        .trim_start_matches('.');
-                    format!("{anchor}{new_tail}")
+                    let base = crate::query::resolve_node_reference(
+                        owner_new,
+                        node,
+                        anchor.trim_end_matches('.'),
+                    );
+                    match base.and_then(|base| {
+                        new_abs.strip_prefix(&format!("{base}.")).map(str::to_owned)
+                    }) {
+                        Some(tail) => format!("{anchor}{tail}"),
+                        None => new_abs,
+                    }
                 };
                 ref_fixes.push((ra.range_value(), xml_escape(&new_value)));
             }
@@ -768,7 +800,7 @@ pub fn rename_component(
                 continue;
             };
             // Only components we just renamed carry a `new` name; skip the rest.
-            if !to_rename.iter().any(|(_, new)| new == owner_new) {
+            if !script_owners.contains(owner_new) {
                 continue;
             }
             if let Some(fa) = n.attribute_node("Filename") {
@@ -814,36 +846,50 @@ pub(crate) fn build_trigger(owner: &str, abs_clock: &str) -> String {
     format!("{parents}{tail}")
 }
 
-/// Validate that `name` is a valid component name (no dots; allowed chars: letters,
-/// digits, space, underscore, hyphen, parentheses — matching M1 naming convention).
+/// Validate only the introduced leaf, so existing invalid names can be repaired.
 pub(crate) fn validate_name_segment(name: &str) -> Result<(), EditError> {
-    // Reject empty or dot-containing names (dots delimit path segments).
-    if name.is_empty() {
-        return Err(EditError::Invalid("name must not be empty".into()));
-    }
-    // The full dotted path form is allowed for create_group (caller passes the
-    // FULL path like `Root.Engine.NewGroup`).  We validate that the LAST segment
-    // (after the last dot) has no further dots.  That last segment is the new
-    // component's Name attribute value.
     let segment = name.rsplit('.').next().unwrap_or(name);
-    if segment.is_empty() {
-        return Err(EditError::Invalid("name must not end with a dot".into()));
-    }
-    // A segment of only spaces/tabs is non-empty but would splice in a blank
-    // `Name="  "`, which M1-Build won't treat as a usable named object. Reject
-    // it, mirroring the `trim().is_empty()` guards the value-validators use
-    // (set_unit, set_quantity, add_tag, create_constant).
     if segment.trim().is_empty() {
         return Err(EditError::Invalid(
-            "name segment must not be whitespace-only".into(),
+            "name segment must not be empty or whitespace-only".into(),
         ));
     }
-    // M1 names: letters, digits, underscore, hyphen, space, parentheses are all
-    // seen in the corpus.  The real constraint from the manual is "no dot in a
-    // segment" (dots are reserved for path separation).  We enforce that only.
-    if segment.contains('.') {
+    if let Some(reason) = crate::validate::invalid_name_segment_reason(segment) {
         return Err(EditError::Invalid(format!(
-            "name segment `{segment}` must not contain a dot"
+            "invalid object name `{segment}`: {reason}"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a flat backing-script filename on every supported host.
+/// Directory paths and Windows device names are refused before filesystem edits.
+pub fn validate_script_filename(filename: &str) -> Result<(), EditError> {
+    let stem = filename
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            stem.strip_prefix(prefix).is_some_and(|n| {
+                matches!(
+                    n,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        });
+    if filename.is_empty()
+        || matches!(filename, "." | "..")
+        || filename.ends_with(['.', ' '])
+        || filename.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+        })
+        || device
+    {
+        return Err(EditError::Invalid(format!(
+            "unsafe backing script filename `{filename}`: expected a portable filename inside Scripts"
         )));
     }
     Ok(())

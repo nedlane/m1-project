@@ -185,6 +185,46 @@ pub fn resolve_trigger(owner: &str, trigger: &str) -> Option<String> {
 /// `This.`/`Parent.`-anchored (or absolute) path to another component.
 pub const REFERENCE_ATTRS: [&str; 3] = ["Source", "Target", "NameTarget"];
 
+/// Reference-bearing nodes owned by one component, including nested table axes.
+pub(crate) fn reference_nodes<'a, 'input>(
+    props: roxmltree::Node<'a, 'input>,
+) -> impl Iterator<Item = roxmltree::Node<'a, 'input>> {
+    std::iter::once(props).chain(
+        props
+            .children()
+            .filter(|n| n.has_tag_name("Axis"))
+            .flat_map(|axis| {
+                axis.children()
+                    .filter(|n| matches!(n.tag_name().name(), "X" | "Y" | "Z"))
+            }),
+    )
+}
+
+/// Table axes use the table as their base (`Parent.Speed` from create_table);
+/// direct Props references use the enclosing group.
+pub(crate) fn reference_scope<'a>(owner: &'a str, node: roxmltree::Node) -> &'a str {
+    if node.has_tag_name("Props") {
+        owner
+            .rsplit_once('.')
+            .map(|(group, _)| group)
+            .unwrap_or(owner)
+    } else {
+        owner
+    }
+}
+
+pub(crate) fn resolve_node_reference(
+    owner: &str,
+    node: roxmltree::Node,
+    value: &str,
+) -> Option<String> {
+    if node.has_tag_name("Props") {
+        resolve_reference(owner, value)
+    } else {
+        resolve_reference_in_group(owner, value)
+    }
+}
+
 /// Resolve a `This.`/`Parent.`-anchored (or absolute) reference to its absolute
 /// path, given the referring component's own `Name`. `This` denotes the
 /// referrer's enclosing group (manual p.41), each `Parent` climbs one further

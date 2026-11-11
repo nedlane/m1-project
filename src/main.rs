@@ -1042,19 +1042,68 @@ fn create_script_file(
     project: &Path,
     name: &str,
 ) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    let path = checked_script_path(project, &m1_project::script_relpath(name))?;
     let dir = scripts_dir(project);
-    let path = dir.join(m1_project::script_relpath(name));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    if path.exists() {
-        eprintln!(
-            "backing script already exists, left as-is: {}",
+    match std::fs::create_dir(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(format!("creating {}: {e}", dir.display()).into()),
+    }
+    checked_script_path(project, &m1_project::script_relpath(name))?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(_) => {
+            eprintln!("Created {}", path.display());
+            Ok(Some(path))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            script_file_exists(&path)?;
+            eprintln!(
+                "backing script already exists, left as-is: {}",
+                path.display()
+            );
+            Ok(None)
+        }
+        Err(e) => Err(format!("creating {}: {e}", path.display()).into()),
+    }
+}
+
+/// Reject path redirection before touching any backing script. The explicitly
+/// selected project directory is trusted; its Scripts child must be a directory.
+fn checked_script_path(
+    project: &Path,
+    filename: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    m1_project::validate_script_filename(filename)?;
+    let dir = scripts_dir(project);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(format!(
+                "{}: expected a directory, not a link or special file",
+                dir.display()
+            )
+            .into());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{}: {e}", dir.display()).into()),
+    }
+    Ok(dir.join(filename))
+}
+
+fn script_file_exists(path: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(true),
+        Ok(_) => Err(format!(
+            "{}: expected a regular script file, not a link or special file",
             path.display()
-        );
-        Ok(None)
-    } else {
-        std::fs::File::create(&path).map_err(|e| format!("creating {}: {e}", path.display()))?;
-        eprintln!("Created {}", path.display());
-        Ok(Some(path))
+        )
+        .into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("{}: {e}", path.display()).into()),
     }
 }
 
@@ -1070,12 +1119,19 @@ fn preflight_renames(
     project: &Path,
     renames: &[m1_project::ScriptRename],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let dir = scripts_dir(project);
+    let mut sources = std::collections::BTreeSet::new();
     let mut dests: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for r in renames {
-        let from = dir.join(&r.old);
-        let to = dir.join(&r.new);
-        if !from.exists() {
+        let from = checked_script_path(project, &r.old)?;
+        let to = checked_script_path(project, &r.new)?;
+        if !sources.insert(r.old.as_str()) {
+            return Err(format!(
+                "duplicate rename source {}: script is shared by multiple components",
+                from.display()
+            )
+            .into());
+        }
+        if !script_file_exists(&from)? {
             // The rename loop will skip this source with a warning; an occupied
             // destination for a skipped rename is not touched, so not an error.
             continue;
@@ -1088,7 +1144,7 @@ fn preflight_renames(
             )
             .into());
         }
-        if to.exists() && !is_same_file(&from, &to) {
+        if script_file_exists(&to)? && !is_same_file(&from, &to) {
             return Err(format!(
                 "rename destination already exists: {} (refusing to overwrite it; move \
                  the existing file aside first, project unchanged)",
@@ -1207,7 +1263,7 @@ fn write_or_print(
         // reader mojibakes to `Â°` (#12). With 1252, `°` stays the single byte
         // 0xB0 and `encode_checked` REFUSES a unit MoTeC's 1252 cannot represent
         // (e.g. ohm `Ω`) rather than silently corrupting it.
-        let encoding = motec_write_encoding(out);
+        let encoding = motec_write_encoding(out)?;
         let bytes = m1_workspace::encode_checked(out, encoding)
             .map_err(|e| format!("cannot save in the file's {encoding:?} encoding: {e}"))?;
         // Atomic write: a temp file in the same directory, fsync'd, then renamed
@@ -1229,23 +1285,40 @@ fn write_or_print(
 /// byte-sniffed encoding (`read_text_with_encoding`): a pure-ASCII project sniffs
 /// as UTF-8, and a newly-inserted non-ASCII unit would then be written as UTF-8
 /// that a 1252 reader mojibakes (#12).
-fn motec_write_encoding(xml: &str) -> m1_workspace::Encoding {
-    // Snap the 256-byte head window down to a char boundary: a naive
-    // `&xml[..256]` panics when a multi-byte UTF-8 char straddles offset 256
-    // (#54). `floor_char_boundary` is still unstable, so walk down to the
-    // nearest boundary at or below the cap.
-    let mut end = xml.len().min(256);
-    while end > 0 && !xml.is_char_boundary(end) {
-        end -= 1;
+fn motec_write_encoding(xml: &str) -> Result<m1_workspace::Encoding, String> {
+    // The writer has already parsed the XML. Read its declaration without a
+    // fixed window or assumptions about XML whitespace around equals signs.
+    let declaration = xml
+        .trim_start_matches('\u{feff}')
+        .strip_prefix("<?xml")
+        .filter(|rest| rest.starts_with([' ', '\t', '\r', '\n']))
+        .and_then(|rest| rest.split_once("?>").map(|(decl, _)| decl));
+    let Some((_, rest)) = declaration.and_then(|decl| decl.split_once("encoding")) else {
+        return Ok(m1_workspace::Encoding::Windows1252);
+    };
+    let quoted = rest
+        .trim_start()
+        .strip_prefix('=')
+        .ok_or_else(|| "invalid XML encoding declaration".to_string())?
+        .trim_start();
+    let quote = quoted
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '\'' | '"'))
+        .ok_or_else(|| "invalid XML encoding declaration".to_string())?;
+    let encoding = quoted[1..]
+        .split_once(quote)
+        .ok_or_else(|| "invalid XML encoding declaration".to_string())?
+        .0;
+    if encoding.eq_ignore_ascii_case("utf-8") {
+        Ok(m1_workspace::Encoding::Utf8)
+    } else if encoding.eq_ignore_ascii_case("windows-1252") {
+        Ok(m1_workspace::Encoding::Windows1252)
+    } else {
+        Err(format!(
+            "unsupported XML encoding `{encoding}`: expected UTF-8 or Windows-1252"
+        ))
     }
-    let head = &xml[..end];
-    if let Some(end) = head.find("?>") {
-        let decl = head[..end].to_ascii_lowercase();
-        if decl.contains("encoding=\"utf-8\"") || decl.contains("encoding='utf-8'") {
-            return m1_workspace::Encoding::Utf8;
-        }
-    }
-    m1_workspace::Encoding::Windows1252
 }
 
 /// Produce a JSON string literal. Escapes everything RFC 8259 §7 requires:
@@ -1311,15 +1384,16 @@ mod tests {
         assert_eq!(
             motec_write_encoding(
                 "<?xml version=\"1.0\"?>\n<Project Locale=\"English_Australia.1252\"/>"
-            ),
+            )
+            .unwrap(),
             m1_workspace::Encoding::Windows1252
         );
         assert_eq!(
-            motec_write_encoding("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<x/>"),
+            motec_write_encoding("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<x/>").unwrap(),
             m1_workspace::Encoding::Utf8
         );
         assert_eq!(
-            motec_write_encoding("<?xml version='1.0' encoding='utf-8'?>"),
+            motec_write_encoding("<?xml version='1.0' encoding='utf-8'?>").unwrap(),
             m1_workspace::Encoding::Utf8
         );
     }
@@ -1341,7 +1415,7 @@ mod tests {
         assert!(!xml.is_char_boundary(256));
         // Must not panic; this doc has no utf-8 declaration → Windows-1252.
         assert_eq!(
-            motec_write_encoding(&xml),
+            motec_write_encoding(&xml).unwrap(),
             m1_workspace::Encoding::Windows1252
         );
     }

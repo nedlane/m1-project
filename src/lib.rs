@@ -95,7 +95,7 @@ pub use edits::{
     create_group, create_parameter, create_reference, create_scheduled_function, create_table,
     delete_component, remove_tag, rename_component, script_relpath, set_call_rate, set_comment,
     set_display_range, set_dps, set_format, set_quantity, set_security, set_storage_class,
-    set_type, set_unit, set_validation, set_value,
+    set_type, set_unit, set_validation, set_value, validate_script_filename,
 };
 pub use format::{
     FormatReport, KNOWN_FORMATS, KnownFormat, convert_format, file_format, format_report,

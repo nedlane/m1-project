@@ -189,7 +189,7 @@ pub fn convert_format(xml: &str, target: u32) -> Result<String, EditError> {
 
     // Signatures.
     for sig in doc.descendants().filter(|n| n.has_tag_name("Signature")) {
-        collect_signature_fixes(xml, sig, upgrade, &mut fixes);
+        collect_signature_fixes(xml, sig, upgrade, &mut fixes)?;
     }
 
     Ok(apply_splices_desc(xml.to_string(), fixes))
@@ -212,27 +212,47 @@ fn set_or_insert_attr(
     }
 }
 
-/// Byte offset of the `>` that closes `node`'s opening tag. Object/attribute names
-/// and the values here never contain `>`, so the first `>` from the element start is
-/// the tag close.
+/// Find the opening tag boundary, ignoring greater-than signs in quoted values.
 fn open_tag_gt(xml: &str, node: Node) -> usize {
-    let start = node.range().start;
-    start
-        + xml[start..]
-            .find('>')
-            .expect("an element opening tag has a '>'")
+    let mut quote = None;
+    for (offset, byte) in xml[node.range()].bytes().enumerate() {
+        match (quote, byte) {
+            (Some(q), b) if q == b => quote = None,
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'>') => return node.range().start + offset,
+            _ => {}
+        }
+    }
+    unreachable!("parsed XML elements have an opening tag boundary")
 }
 
-/// The raw bytes inside `elem`'s single `<![CDATA[ … ]]>` section (empty if none).
-/// Taken verbatim from the source so the payload round-trips byte-for-byte; CDATA
-/// cannot contain `]]>`, so the delimiters are unambiguous.
-fn cdata_payload<'a>(xml: &'a str, elem: Node) -> &'a str {
-    let s = &xml[elem.range()];
-    const OPEN: &str = "<![CDATA[";
-    match (s.find(OPEN), s.rfind("]]>")) {
-        (Some(a), Some(b)) if a + OPEN.len() <= b => &s[a + OPEN.len()..b],
-        _ => "",
+/// Preserve a single CDATA payload; refuse other layouts rather than lose text.
+fn cdata_payload<'a>(xml: &'a str, elem: Node) -> Result<&'a str, EditError> {
+    if elem.attributes().len() != 0 {
+        return Err(EditError::Invalid(
+            "unsupported return description attributes".into(),
+        ));
     }
+    let gt = open_tag_gt(xml, elem);
+    if xml[..gt].ends_with('/') {
+        return Ok("");
+    }
+    let close = xml[elem.range()]
+        .rfind("</")
+        .map(|n| elem.range().start + n)
+        .ok_or_else(|| EditError::Invalid("unsupported return description layout".into()))?;
+    let body = xml[gt + 1..close].trim();
+    if body.is_empty() {
+        return Ok("");
+    }
+    body.strip_prefix("<![CDATA[")
+        .and_then(|s| s.strip_suffix("]]>"))
+        .filter(|s| !s.contains("]]>"))
+        .ok_or_else(|| {
+            EditError::Invalid(
+                "unsupported return description layout; expected one CDATA section".into(),
+            )
+        })
 }
 
 /// Whether a `<Params>` element has no `<Param>` children (the empty `<Params/>`
@@ -241,13 +261,50 @@ fn params_is_empty(params: Node) -> bool {
     !params.children().any(|c| c.has_tag_name("Param"))
 }
 
+/// Replaced containers must contain only their supported child and whitespace.
+fn only_child<'a, 'input>(
+    node: Node<'a, 'input>,
+    name: &str,
+) -> Result<Node<'a, 'input>, EditError> {
+    let mut children = node
+        .children()
+        .filter(|n| !(n.is_text() && n.text().is_some_and(|t| t.trim().is_empty())));
+    let first = children.next().filter(|n| n.has_tag_name(name));
+    match (first, children.next()) {
+        (Some(child), None) => Ok(child),
+        _ => Err(EditError::Invalid(format!(
+            "unsupported <{}> layout: expected exactly one <{name}> child",
+            node.tag_name().name()
+        ))),
+    }
+}
+
 /// Collect the splices that convert one `<Signature>` between 10108 and 10109.
 fn collect_signature_fixes(
     xml: &str,
     sig: Node,
     upgrade: bool,
     fixes: &mut Vec<(Range<usize>, String)>,
-) {
+) -> Result<(), EditError> {
+    let close = xml[sig.range()]
+        .rfind("</Signature>")
+        .map(|offset| sig.range().start + offset)
+        .ok_or_else(|| {
+            EditError::Invalid(
+                "cannot convert a self-closing Signature; expected the M1-Build multiline layout"
+                    .into(),
+            )
+        })?;
+    let line = xml[..close].rfind('\n').ok_or_else(|| {
+        EditError::Invalid(
+            "cannot convert an inline Signature; expected the M1-Build multiline layout".into(),
+        )
+    })?;
+    if !xml[line..close].trim().is_empty() {
+        return Err(EditError::Invalid(
+            "cannot convert an inline Signature; expected the M1-Build multiline layout".into(),
+        ));
+    }
     let b = indent_at(xml, sig.range().start).to_string();
     let c1 = format!("{b} ");
     let c2 = format!("{b}  ");
@@ -256,6 +313,59 @@ fn collect_signature_fixes(
     let params = sig.children().find(|c| c.has_tag_name("Params"));
     let returns = sig.children().find(|c| c.has_tag_name("Returns"));
     let ret_desc = sig.children().find(|c| c.has_tag_name("ReturnDescription"));
+
+    for tag in ["Params", "Returns", "ReturnDescription"] {
+        if sig.children().filter(|n| n.has_tag_name(tag)).count() > 1 {
+            return Err(EditError::Invalid(format!(
+                "unsupported signature with multiple <{tag}> elements"
+            )));
+        }
+    }
+    if upgrade {
+        let ty = sig.attribute("ReturnType").unwrap_or("");
+        if returns.is_some() || (!ty.is_empty() && ret_desc.is_none()) {
+            return Err(EditError::Invalid(
+                "unsupported 10108 return layout; conversion would lose return metadata".into(),
+            ));
+        }
+        if let Some(description) = ret_desc {
+            let payload = cdata_payload(xml, description)?;
+            if ty.is_empty() && !payload.is_empty() {
+                return Err(EditError::Invalid(
+                    "cannot discard a nonempty void return description".into(),
+                ));
+            }
+        }
+        if let Some(params) = params
+            && params_is_empty(params)
+            && (params.attributes().len() != 0
+                || params
+                    .children()
+                    .any(|n| !(n.is_text() && n.text().is_some_and(|t| t.trim().is_empty()))))
+        {
+            return Err(EditError::Invalid(
+                "unsupported empty Params layout; conversion would discard content".into(),
+            ));
+        }
+    } else {
+        if sig.attribute("ReturnType").is_some() || ret_desc.is_some() {
+            return Err(EditError::Invalid(
+                "unsupported mixed signature format".into(),
+            ));
+        }
+        if let Some(returns) = returns {
+            let ret = only_child(returns, "Return")?;
+            if returns.attributes().len() != 0
+                || ret.attributes().any(|a| a.name() != "Type")
+                || ret.attribute("Type").is_none_or(str::is_empty)
+            {
+                return Err(EditError::Invalid(
+                    "unsupported return metadata; conversion would discard content".into(),
+                ));
+            }
+            cdata_payload(xml, only_child(ret, "Description")?)?;
+        }
+    }
 
     if upgrade {
         // 10108 -> 10109.
@@ -283,7 +393,8 @@ fn collect_signature_fixes(
             if t.is_empty() {
                 fixes.push((line_extended_start(xml, r.start)..r.end, String::new()));
             } else {
-                let payload = cdata_payload(xml, rd);
+                let payload = cdata_payload(xml, rd)?;
+                let t = crate::xml::xml_escape(t);
                 let block = format!(
                     "<Returns>\n{c2}<Return Type=\"{t}\">\n{c3}<Description>\n<![CDATA[{payload}]]>\n{c3}</Description>\n{c2}</Return>\n{c1}</Returns>"
                 );
@@ -298,7 +409,10 @@ fn collect_signature_fixes(
             .and_then(|r| r.children().find(|c| c.has_tag_name("Return")))
             .and_then(|r| r.attribute("Type"))
             .unwrap_or("");
-        fixes.push((gt..gt, format!(" ReturnType=\"{t}\"")));
+        fixes.push((
+            gt..gt,
+            format!(" ReturnType=\"{}\"", crate::xml::xml_escape(t)),
+        ));
         // 2. Re-add an empty <Params/> as the first child when there is none.
         if params.is_none() {
             let after = gt + 1;
@@ -311,6 +425,7 @@ fn collect_signature_fixes(
                 .find(|c| c.has_tag_name("Return"))
                 .and_then(|r| r.children().find(|c| c.has_tag_name("Description")))
                 .map(|d| cdata_payload(xml, d))
+                .transpose()?
                 .unwrap_or("");
             let r = rn.range();
             let block =
@@ -318,18 +433,11 @@ fn collect_signature_fixes(
             fixes.push((r.start..r.end, block));
         } else {
             // Void: insert an empty <ReturnDescription> just before </Signature>.
-            let sig_start = sig.range().start;
-            let close = sig_start
-                + xml[sig.range()]
-                    .rfind("</Signature>")
-                    .expect("signature has a closing tag");
-            let nl = xml[..close]
-                .rfind('\n')
-                .expect("the closing tag sits on its own line");
             fixes.push((
-                nl..nl,
+                line..line,
                 format!("\n{c1}<ReturnDescription>\n<![CDATA[]]>\n{c1}</ReturnDescription>"),
             ));
         }
     }
+    Ok(())
 }
