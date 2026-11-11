@@ -481,8 +481,8 @@ fn validate_with_catalog(
     // (owner, trigger) pairs for check 3 — resolution needs `valid_clocks`
     // complete, so it runs after the pass.
     let mut triggered: Vec<(String, String)> = Vec::new();
-    // (owner, attr, value) for the reference-resolution check (Check 9).
-    let mut references: Vec<(String, &'static str, String)> = Vec::new();
+    // (owner, attr, value, resolved path) for the reference-resolution check.
+    let mut references: Vec<(String, &'static str, String, Option<String>)> = Vec::new();
     let mut org_roots: Vec<roxmltree::Node> = Vec::new();
     // DBCRoot module entries (`<Component Classname="BuiltIn.CAN.DBC" MD5=…
     // Name="DBC.<module>">`) for the DBC hash checks (Check 10) and the
@@ -725,9 +725,16 @@ fn validate_with_catalog(
         // Component references (table Axis Source, Reference Target, NameTarget)
         // for Check 9.
         if let Some(p) = props {
-            for attr in crate::query::REFERENCE_ATTRS {
-                if let Some(v) = p.attribute(attr) {
-                    references.push((nm.to_string(), attr, v.to_string()));
+            for node in crate::query::reference_nodes(p) {
+                for attr in crate::query::REFERENCE_ATTRS {
+                    if let Some(v) = node.attribute(attr) {
+                        references.push((
+                            nm.to_string(),
+                            attr,
+                            v.to_string(),
+                            crate::query::resolve_node_reference(nm, node, v),
+                        ));
+                    }
                 }
             }
         }
@@ -908,11 +915,11 @@ fn validate_with_catalog(
     // so the toolchain could both create and certify a broken project. Verified
     // false-positive-free on the real corpora (every EV-M1/AV-M1 reference
     // resolves). A `$(…)` template is dynamic and skipped.
-    for (owner, attr, value) in &references {
+    for (owner, attr, value, resolved) in &references {
         if value.starts_with("$(") {
             continue;
         }
-        match crate::query::resolve_reference(owner, value) {
+        match resolved {
             None => findings.push(Finding {
                 level: FindingLevel::Error,
                 path: owner.clone(),
@@ -920,7 +927,7 @@ fn validate_with_catalog(
                 code: None,
             }),
             Some(abs) => {
-                if !crate::query::reference_resolves(&abs, |p| all_names.contains(p)) {
+                if !crate::query::reference_resolves(abs, |p| all_names.contains(p)) {
                     findings.push(Finding {
                         level: FindingLevel::Error,
                         path: owner.clone(),
