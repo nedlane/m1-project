@@ -4,7 +4,7 @@
 use crate::EditError;
 use crate::query::resolve_trigger;
 use crate::xml::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 const SYSTEM_TAGS: &[&str] = &["Engine", "Vehicle", "Driver"];
@@ -187,26 +187,25 @@ fn default_value_object(
     class_by_path: &HashMap<String, String>,
     catalog: &ModuleCatalog,
 ) -> Option<String> {
-    let default_of = |path: &str| -> Option<String> {
-        let reference = default_by_path.get(path).cloned().or_else(|| {
+    let default_reference = |path: &str| -> Option<String> {
+        default_by_path.get(path).cloned().or_else(|| {
             let class_template = class_by_path
                 .get(path)
                 .and_then(|class| catalog.get(class))?;
             class_template.get("")?.default_value.clone()
-        })?;
-        crate::query::resolve_reference_in_group(path, &reference)
+        })
     };
-    let mut current = default_of(owner)?;
-    for _ in 0..4 {
-        if !class_by_path.contains_key(&current) {
+    let mut current = owner.to_string();
+    let mut visited = HashSet::new();
+    loop {
+        if !visited.insert(current.clone()) || !class_by_path.contains_key(&current) {
             return None;
         }
-        match default_of(&current) {
-            Some(next) if next != current => current = next,
-            _ => return Some(current),
-        }
+        let Some(reference) = default_reference(&current) else {
+            return (current != owner).then_some(current);
+        };
+        current = crate::query::resolve_reference_in_group(&current, &reference)?;
     }
-    Some(current)
 }
 
 fn is_assigned_io_resource(classname: &str, props: Option<roxmltree::Node<'_, '_>>) -> bool {
@@ -434,6 +433,7 @@ fn validate_with_catalog(
     // Components that declare their own tag list; a generated `.Value` with
     // its own tags is judged on them, not on its Reference/resource's tags.
     let mut own_tag_paths = std::collections::HashSet::new();
+    let mut assigned_io_paths = HashSet::new();
     for node in doc.descendants().filter(is_real_component) {
         let Some(name) = node.attribute("Name") else {
             continue;
@@ -444,6 +444,12 @@ fn validate_with_catalog(
         class_by_path.insert(name.to_string(), classname.to_string());
         if component_overrides_tags(node) {
             own_tag_paths.insert(name.to_string());
+        }
+        if is_assigned_io_resource(
+            classname,
+            node.children().find(|child| child.has_tag_name("Props")),
+        ) {
+            assigned_io_paths.insert(name.to_string());
         }
         if classname == "BuiltIn.GroupCompound"
             && name.rsplit('.').next() == Some("State")
@@ -599,13 +605,17 @@ fn validate_with_catalog(
         } else {
             effective_classname
         };
+        let judged_assigned_io = (assigned_io && effective_classname != "(own tags)")
+            || (classname == "BuiltIn.IOResourceParameter"
+                && own_tag_paths.contains(nm)
+                && parent_of(nm).is_some_and(|parent| assigned_io_paths.contains(parent)));
         let illegal = match effective_classname {
             "BuiltIn.Channel" => first_tag_in(&tags, TUNABLE_ONLY_TAGS).map(|tag| (tag, "Normal")),
             "BuiltIn.Parameter" | "BuiltIn.IOResourceParameter" => {
                 first_tag_in(&tags, CHANNEL_ONLY_TAGS).map(|tag| {
                     (
                         tag,
-                        if assigned_io {
+                        if judged_assigned_io {
                             "Setup + Input or Output"
                         } else {
                             "Setup"
@@ -625,7 +635,7 @@ fn validate_with_catalog(
                 ),
                 code: Some(1140),
             });
-        } else if assigned_io
+        } else if judged_assigned_io
             && !conflicted
             && !tags_in_group(&tags, TYPE_TAGS).is_empty()
             && !(has_tag(&tags, "Setup") && (has_tag(&tags, "Input") || has_tag(&tags, "Output")))
@@ -795,12 +805,18 @@ fn validate_with_catalog(
         else {
             continue;
         };
-        let tags = tags_by_path.get(&value).cloned().unwrap_or_else(|| {
-            inherited_module_component(&value, &class_by_path, module_catalog)
-                .map(|component| component.tags.clone())
-                .unwrap_or_default()
-        });
-        if !has_tag(&tags, "Normal") {
+        // Group Type tags also apply to the default value, as they do in
+        // the mandatory-tag pass. Include every ancestor of the resolved
+        // value, including when the default points outside the Sensor owner.
+        let inherits_normal = std::iter::successors(Some(value.as_str()), |path| parent_of(path))
+            .any(|path| {
+                let tags = tags_by_path.get(path).map(Vec::as_slice).or_else(|| {
+                    inherited_module_component(path, &class_by_path, module_catalog)
+                        .map(|component| component.tags.as_slice())
+                });
+                tags.is_some_and(|tags| has_tag(tags, "Normal"))
+            });
+        if !inherits_normal {
             findings.push(Finding {
                 level: FindingLevel::Warning,
                 path: owner.to_string(),
@@ -1486,6 +1502,58 @@ mod tests {
     }
 
     #[test]
+    fn validate_sensor_defaults_inherit_ancestor_type_tags() {
+        for (tag, expected_warnings) in [("Normal", 0), ("Diagnostic", 1)] {
+            let xml = project_with_components(&format!(
+                r#"<Component Classname="BuiltIn.GroupCompound" Name="Root"><Props SelectedTags="{tag}"/></Component>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.Wheel"><Props UseDefValue="true" DefValue="This.Value"/></Component>
+<Component Classname="BuiltIn.Channel" Name="Root.Wheel.Value"><Props Security="Tune"/></Component>
+<Component Classname="_IOMethod.periodic" Name="Root.Wheel.Sensor"/>"#,
+            ));
+            let findings = findings_with_code(&xml, 1649);
+            assert_eq!(findings.len(), expected_warnings, "{tag}: {findings:?}");
+        }
+    }
+
+    #[test]
+    fn validate_sensor_defaults_follow_long_chains_to_the_terminal_value() {
+        for (tag, expected_warnings) in [("Normal", 0), ("Diagnostic", 1)] {
+            let mut components = String::from(
+                r#"<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="_IOMethod.periodic" Name="Root.G0.Sensor"/>"#,
+            );
+            for index in 0..6 {
+                components.push_str(&format!(
+                    r#"<Component Classname="BuiltIn.GroupCompound" Name="Root.G{index}"><Props UseDefValue="true" DefValue="Root.G{}"/></Component>"#,
+                    index + 1,
+                ));
+            }
+            components.push_str(&format!(
+                r#"<Component Classname="BuiltIn.Channel" Name="Root.G6"><Props Security="Tune" SelectedTags="{tag}"/></Component>"#,
+            ));
+            let findings = findings_with_code(&project_with_components(&components), 1649);
+            assert_eq!(findings.len(), expected_warnings, "{tag}: {findings:?}");
+            if let Some(finding) = findings.first() {
+                assert!(finding.message.contains("`Root.G6`"), "{finding:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn validate_sensor_defaults_do_not_resolve_cycles_or_missing_targets() {
+        for target in ["Root.G0", "Root.G1", "Root.Missing"] {
+            let xml = project_with_components(&format!(
+                r#"<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.G0"><Props UseDefValue="true" DefValue="{target}"/></Component>
+<Component Classname="_IOMethod.periodic" Name="Root.G0.Sensor"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.G1"><Props UseDefValue="true" DefValue="Root.G0"/></Component>"#,
+            ));
+            let findings = findings_with_code(&xml, 1649);
+            assert!(findings.is_empty(), "{target}: {findings:?}");
+        }
+    }
+
+    #[test]
     fn validate_follows_module_class_defaults_for_sensor_groups() {
         let module = r#"<MoTecM1BuildModuleSet Name="MoTeC Input"><Module Name="Input.Generic.Sensor"><ComponentStream><List>
 <Component Classname="BuiltIn.GroupCompound" Name="Base"><Props UseDefValue="true" DefValue="This.Value"/></Component>
@@ -1566,6 +1634,37 @@ mod tests {
             tag_findings.is_empty(),
             "Setup + Input is the complete legal assignment: {tag_findings:?}"
         );
+    }
+
+    #[test]
+    fn validate_assigned_io_uses_the_generated_values_own_tags() {
+        for (resource_tags, value_tags, expected_codes) in [
+            ("Setup", "Setup Input", vec![]),
+            ("Setup Input", "Setup", vec![1648]),
+            ("Setup Input", "Pin", vec![1140]),
+            ("Setup Input", "Setup Tune", vec![1141]),
+        ] {
+            let xml = project_with_components(&format!(
+                r#"<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.IOResourceValueInput" Name="Root.Input Resource"><Props NameCreation="AutoParam" NameTarget="This.Value" SelectedTags="{resource_tags}"/></Component>
+<Component Classname="BuiltIn.IOResourceParameter" Name="Root.Input Resource.Value"><Props Security="Resource" SelectedTags="{value_tags}"/></Component>"#,
+            ));
+            let findings: Vec<_> = validate(&xml)
+                .unwrap()
+                .into_iter()
+                .filter(|finding| matches!(finding.code, Some(1140 | 1141 | 1648)))
+                .collect();
+            let codes: Vec<_> = findings.iter().filter_map(|finding| finding.code).collect();
+            assert_eq!(
+                codes, expected_codes,
+                "{resource_tags} / {value_tags}: {findings:?}"
+            );
+            assert!(
+                findings
+                    .iter()
+                    .all(|finding| finding.path == "Root.Input Resource.Value")
+            );
+        }
     }
 
     #[test]
