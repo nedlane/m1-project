@@ -1159,6 +1159,17 @@ mod tests {
     // ---- #23 rename_component -----------------------------------------------
 
     #[test]
+    fn rename_preserves_bare_this_references_inside_the_moved_group() {
+        let xml = r#"<Project><ComponentStream><List>
+<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.Group"/>
+<Component Classname="BuiltIn.Reference" Name="Root.Group.Link"><Props Target="This"/></Component>
+</List></ComponentStream></Project>"#;
+        let (renamed, _) = rename_component(xml, "Root.Group", "Renamed").unwrap();
+        assert_eq!(renamed, xml.replace("Root.Group", "Root.Renamed"));
+    }
+
+    #[test]
     fn rename_component_updates_name() {
         let (out, _warns) = rename_component(PRJ, "Root.Engine", "Motor").unwrap();
         parses(&out);

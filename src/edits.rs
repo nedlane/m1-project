@@ -522,6 +522,9 @@ pub fn delete_component(
 /// the target tail (`"Parent.Parent.Speed"` -> `("Parent.Parent.", "Speed")`,
 /// `"This.Value"` -> `("This.", "Value")`, an absolute `"Root.X"` -> `("", "Root.X")`).
 fn split_anchor(value: &str) -> (&str, &str) {
+    if value == "This" {
+        return (value, "");
+    }
     if let Some(rest) = value.strip_prefix("This.") {
         return ("This.", rest);
     }
