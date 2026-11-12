@@ -343,3 +343,109 @@ fn downgrade_refuses_additional_return_content() {
         f.unchanged(&xml);
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn leaf_project_symlinks_refuse_writes_before_script_side_effects() {
+    use std::os::unix::fs::symlink;
+    let xml = project(
+        "<Component Classname=\"BuiltIn.FuncUserParam\" Name=\"Root.F\" Filename=\"F.m1scr\"/>",
+    );
+    let commands: &[&[&str]] = &[
+        &["rename-component", "--name", "Root.F", "--new-name", "G"],
+        &["create-function", "--name", "Root.New"],
+        &["create-scheduled-function", "--name", "Root.New"],
+        &["create-group", "--name", "Root.New"],
+        &["format", "--target", "10108"],
+        &["format", "--target", "10109"],
+    ];
+    for separate_directory in [false, true] {
+        let f = Fixture::new(&xml);
+        std::fs::create_dir(f.0.join("Scripts")).unwrap();
+        std::fs::write(f.0.join("Scripts/F.m1scr"), b"// preserve code\r\n").unwrap();
+        let alias = if separate_directory {
+            std::fs::create_dir(f.0.join("aliases")).unwrap();
+            f.0.join("aliases/Alias.m1prj")
+        } else {
+            f.0.join("Alias.m1prj")
+        };
+        symlink(f.0.join("Project.m1prj"), &alias).unwrap();
+        for args in commands {
+            for preview in [Some("--dry-run"), Some("--stdout"), None] {
+                let mut cmd = Command::new(env!("CARGO_BIN_EXE_m1-project"));
+                cmd.args(*args).arg("--project").arg(&alias);
+                if let Some(flag) = preview {
+                    cmd.arg(flag);
+                }
+                let output = cmd.output().unwrap();
+                if preview.is_some() {
+                    assert!(output.status.success(), "{args:?}: {output:?}");
+                } else {
+                    assert!(!output.status.success(), "{args:?}: {output:?}");
+                    assert!(String::from_utf8_lossy(&output.stderr).contains("symlink"));
+                }
+                f.unchanged(&xml);
+                assert!(alias.is_symlink());
+                assert_eq!(
+                    std::fs::read(f.0.join("Scripts/F.m1scr")).unwrap(),
+                    b"// preserve code\r\n"
+                );
+                assert_eq!(std::fs::read_dir(f.0.join("Scripts")).unwrap().count(), 1);
+                if separate_directory {
+                    assert_eq!(
+                        std::fs::read_dir(alias.parent().unwrap()).unwrap().count(),
+                        1
+                    );
+                }
+            }
+        }
+        for args in [&["list-components"][..], &["format"][..]] {
+            let output = Command::new(env!("CARGO_BIN_EXE_m1-project"))
+                .args(args)
+                .arg("--project")
+                .arg(&alias)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(alias.is_symlink());
+            f.unchanged(&xml);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_project_symlinks_keep_xml_and_scripts_together() {
+    use std::os::unix::fs::symlink;
+    let xml = project(
+        "<Component Classname=\"BuiltIn.FuncUserParam\" Name=\"Root.F\" Filename=\"F.m1scr\"/>",
+    );
+    let f = Fixture::new(&xml);
+    std::fs::create_dir(f.0.join("Scripts")).unwrap();
+    std::fs::write(f.0.join("Scripts/F.m1scr"), b"// preserve code\n").unwrap();
+    let alias = f.0.join("directory-alias");
+    symlink(&f.0, &alias).unwrap();
+    for args in [
+        &["rename-component", "--name", "Root.F", "--new-name", "G"][..],
+        &["create-function", "--name", "Root.New"][..],
+        &["format", "--target", "10108"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_m1-project"))
+            .args(args)
+            .arg("--project")
+            .arg(alias.join("Project.m1prj"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+    assert!(alias.is_symlink());
+    assert_eq!(
+        std::fs::read(f.0.join("Scripts/G.m1scr")).unwrap(),
+        b"// preserve code\n"
+    );
+    assert!(!f.0.join("Scripts/F.m1scr").exists());
+    assert!(f.0.join("Scripts/New.m1scr").is_file());
+    let out = std::fs::read_to_string(f.0.join("Project.m1prj")).unwrap();
+    assert!(out.contains("Filename=\"G.m1scr\""));
+    assert!(out.contains("FileFormat=\"10108\""));
+}

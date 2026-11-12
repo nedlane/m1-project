@@ -661,6 +661,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 }
                 // Convert, honouring --dry-run / --stdout via the shared writer.
                 Some(t) => {
+                    check_project_write_path(cli, project)?;
                     let out = m1_project::convert_format(&xml, *t)?;
                     return write_or_print(cli, project, &xml, &out);
                 }
@@ -670,6 +671,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
 
     let project = cli.command.project_path();
+    check_project_write_path(cli, project)?;
     // Decode tolerantly (UTF-8 with a Windows-1252 fallback). The write-back
     // encoding is determined from MoTeC's convention below, not by sniffing.
     let xml =
@@ -1222,6 +1224,19 @@ fn rollback_renames(project: &Path, done: &[m1_project::ScriptRename]) {
             eprintln!("Rolled back {} -> {}", from.display(), to.display());
         }
     }
+}
+
+/// Reads follow a leaf symlink, but atomic publication replaces it. Refuse before
+/// script side effects so XML and backing files keep the same project identity.
+fn check_project_write_path(cli: &Cli, project: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if !cli.stdout && !cli.dry_run && std::fs::symlink_metadata(project)?.is_symlink() {
+        return Err(format!(
+            "refusing to edit project-file symlink {}; use the target project path instead",
+            project.display()
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Route the edited XML: `--stdout` prints the raw result, `--dry-run` prints

@@ -123,7 +123,9 @@ Unsupported layouts return an error before the project is written.
 Global flags: `--dry-run` previews the edit as a unified diff (and reports the
 side effects it would perform, like script renames) while `--stdout` prints
 the resulting XML for piping — neither touches any file. Without either, the
-file is edited in place (atomically). JSON output is available where it makes
+file is edited in place (atomically). Real writes refuse a symlink at the project
+file itself; use its target path instead. Directory aliases, read-only commands,
+and previews remain supported. JSON output is available where it makes
 sense for scripting.
 
 ## Development
