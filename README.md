@@ -118,7 +118,10 @@ Write-back follows an explicit UTF-8 or Windows-1252 XML declaration, including
 whitespace around `encoding =`. An absent declaration keeps the M1-Build
 Windows-1252 convention; other declared encodings are refused. Format conversion
 requires the supported multiline signature and CDATA description layout.
-Unsupported layouts return an error before the project is written.
+Unsupported layouts and signatures with in-scope XML namespaces return an error
+before the project is written. Each signature must use consistent LF or CRLF
+structural newlines. Different signatures may use different styles, and CDATA
+bytes retain their original line endings.
 
 Global flags: `--dry-run` previews the edit as a unified diff (and reports the
 side effects it would perform, like script renames) while `--stdout` prints

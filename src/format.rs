@@ -279,6 +279,36 @@ fn only_child<'a, 'input>(
     }
 }
 
+/// A generated block uses one newline style; raw XML payloads retain their bytes.
+fn signature_newlines_match(mut source: &str, newline: &str) -> bool {
+    while let Some(offset) = source.find(['<', '\r', '\n']) {
+        source = &source[offset..];
+        // Payload and comment bytes are retained, not regenerated as structure.
+        let end_marker = if source.starts_with("<![CDATA[") {
+            Some("]]>")
+        } else if source.starts_with("<!--") {
+            Some("-->")
+        } else if source.starts_with("<?") {
+            Some("?>")
+        } else {
+            None
+        };
+        if let Some(marker) = end_marker {
+            let Some(end) = source.find(marker) else {
+                return false;
+            };
+            source = &source[end + marker.len()..];
+        } else if let Some(rest) = source.strip_prefix('<') {
+            source = rest;
+        } else if let Some(rest) = source.strip_prefix(newline) {
+            source = rest;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
 /// Collect the splices that convert one `<Signature>` between 10108 and 10109.
 fn collect_signature_fixes(
     xml: &str,
@@ -286,6 +316,16 @@ fn collect_signature_fixes(
     upgrade: bool,
     fixes: &mut Vec<(Range<usize>, String)>,
 ) -> Result<(), EditError> {
+    // Local-name matching cannot distinguish extension metadata that splices discard.
+    if sig.descendants().filter(Node::is_element).any(|node| {
+        node.tag_name().namespace().is_some()
+            || node.attributes().any(|attr| attr.namespace().is_some())
+            || node.namespaces().len() != 0
+    }) {
+        return Err(EditError::Invalid(
+            "unsupported signature namespaces; refusing conversion".into(),
+        ));
+    }
     let close = xml[sig.range()]
         .rfind("</Signature>")
         .map(|offset| sig.range().start + offset)
@@ -300,9 +340,19 @@ fn collect_signature_fixes(
             "cannot convert an inline Signature; expected the M1-Build multiline layout".into(),
         )
     })?;
+    let (line, newline) = if xml[..line].ends_with('\r') {
+        (line - 1, "\r\n")
+    } else {
+        (line, "\n")
+    };
     if !xml[line..close].trim().is_empty() {
         return Err(EditError::Invalid(
             "cannot convert an inline Signature; expected the M1-Build multiline layout".into(),
+        ));
+    }
+    if !signature_newlines_match(&xml[sig.range()], newline) {
+        return Err(EditError::Invalid(
+            "unsupported mixed signature newlines; refusing conversion".into(),
         ));
     }
     let b = indent_at(xml, sig.range().start).to_string();
@@ -396,7 +446,7 @@ fn collect_signature_fixes(
                 let payload = cdata_payload(xml, rd)?;
                 let t = crate::xml::xml_escape(t);
                 let block = format!(
-                    "<Returns>\n{c2}<Return Type=\"{t}\">\n{c3}<Description>\n<![CDATA[{payload}]]>\n{c3}</Description>\n{c2}</Return>\n{c1}</Returns>"
+                    "<Returns>{newline}{c2}<Return Type=\"{t}\">{newline}{c3}<Description>{newline}<![CDATA[{payload}]]>{newline}{c3}</Description>{newline}{c2}</Return>{newline}{c1}</Returns>"
                 );
                 fixes.push((r.start..r.end, block));
             }
@@ -416,7 +466,7 @@ fn collect_signature_fixes(
         // 2. Re-add an empty <Params/> as the first child when there is none.
         if params.is_none() {
             let after = gt + 1;
-            fixes.push((after..after, format!("\n{c1}<Params/>")));
+            fixes.push((after..after, format!("{newline}{c1}<Params/>")));
         }
         // 3. <Returns>/<Return> -> <ReturnDescription>, or append an empty one if void.
         if let Some(rn) = returns {
@@ -428,14 +478,15 @@ fn collect_signature_fixes(
                 .transpose()?
                 .unwrap_or("");
             let r = rn.range();
-            let block =
-                format!("<ReturnDescription>\n<![CDATA[{payload}]]>\n{c1}</ReturnDescription>");
+            let block = format!(
+                "<ReturnDescription>{newline}<![CDATA[{payload}]]>{newline}{c1}</ReturnDescription>"
+            );
             fixes.push((r.start..r.end, block));
         } else {
             // Void: insert an empty <ReturnDescription> just before </Signature>.
             fixes.push((
                 line..line,
-                format!("\n{c1}<ReturnDescription>\n<![CDATA[]]>\n{c1}</ReturnDescription>"),
+                format!("{newline}{c1}<ReturnDescription>{newline}<![CDATA[]]>{newline}{c1}</ReturnDescription>"),
             ));
         }
     }

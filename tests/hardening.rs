@@ -449,3 +449,121 @@ fn directory_project_symlinks_keep_xml_and_scripts_together() {
     assert!(out.contains("Filename=\"G.m1scr\""));
     assert!(out.contains("FileFormat=\"10108\""));
 }
+
+#[test]
+fn conversion_refuses_namespaced_return_metadata() {
+    let returns = "<Returns><Return Type=\"f32\"><Description><![CDATA[KEEP]]></Description></Return></Returns>";
+    for content in [
+        returns.replace(
+            "Type=\"f32\"",
+            "Type=\"f32\" xmlns:a=\"urn:audit\" a:Type=\"KEEP_METADATA\"",
+        ),
+        returns.replace("<Return Type", "<Return Extra=\"KEEP_METADATA\" Type"),
+        returns.replace("<Returns>", "<Returns xmlns=\"urn:audit\">"),
+        returns
+            .replace("<Return Type", "<a:Return xmlns:a=\"urn:audit\" Type")
+            .replace("</Return>", "</a:Return>"),
+        returns
+            .replace("<Description>", "<a:Description xmlns:a=\"urn:audit\">")
+            .replace("</Description>", "</a:Description>"),
+        returns.replace(
+            "<Description>",
+            "<Description xmlns:a=\"urn:audit\" a:Extra=\"KEEP_METADATA\">",
+        ),
+        returns.replace("<Returns>", "<Returns xmlns:a=\"urn:audit\">"),
+        returns.replace("Type=\"f32\"", "xmlns:a=\"urn:audit\" a:Type=\"f32\""),
+        returns.replace("<Return Type", "<Return xml:space=\"preserve\" Type"),
+    ] {
+        let xml = project(&format!(
+            "\n<Signature Name=\"\">\n {content}\n</Signature>\n"
+        ));
+        roxmltree::Document::parse(&xml).unwrap();
+        let f = Fixture::new(&xml);
+        for flag in [None, Some("--dry-run"), Some("--stdout")] {
+            let mut args = vec!["format", "--target", "10108"];
+            args.extend(flag);
+            let output = f.run(&args);
+            assert!(!output.status.success(), "{content}: {output:?}");
+            assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
+            f.unchanged(&xml);
+        }
+        assert!(convert_format(&xml, 10108).is_err(), "{content}");
+    }
+    let malformed = project(
+        "\n<Signature>\n <Returns><Return Type=\"f32\" a:Type=\"unbound\"/></Returns>\n</Signature>",
+    );
+    assert!(convert_format(&malformed, 10108).is_err());
+    let f = Fixture::new(&malformed);
+    assert!(!f.run(&["format", "--target", "10108"]).status.success());
+    f.unchanged(&malformed);
+}
+
+#[test]
+fn upgrade_refuses_namespaced_signature_content() {
+    for content in [
+        "<Signature Name=\"\" ReturnType=\"f32\">\n <Params/>\n <a:ReturnDescription xmlns:a=\"urn:audit\"><![CDATA[KEEP]]></a:ReturnDescription>\n</Signature>",
+        "<Signature Name=\"\" ReturnType=\"\">\n <Params xmlns:a=\"urn:audit\" a:Extra=\"KEEP\"/>\n <ReturnDescription><![CDATA[]]></ReturnDescription>\n</Signature>",
+        "<Signature xmlns=\"urn:audit\" Name=\"\" ReturnType=\"\">\n <Params/>\n <ReturnDescription><![CDATA[]]></ReturnDescription>\n</Signature>",
+        "<Signature xmlns:a=\"urn:audit\" Name=\"\" a:ReturnType=\"KEEP\">\n <Params/>\n <ReturnDescription><![CDATA[]]></ReturnDescription>\n</Signature>",
+        "<a:Signature xmlns:a=\"urn:audit\" ReturnType=\"\">\n <Params/>\n <ReturnDescription><![CDATA[]]></ReturnDescription>\n</a:Signature>",
+    ] {
+        let xml = project(&format!("\n{content}\n")).replace("10109", "10108");
+        roxmltree::Document::parse(&xml).unwrap();
+        let f = Fixture::new(&xml);
+        let output = f.run(&["format", "--target", "10109"]);
+        assert!(!output.status.success(), "{content}: {output:?}");
+        f.unchanged(&xml);
+        assert!(convert_format(&xml, 10109).is_err(), "{content}");
+    }
+}
+
+#[test]
+fn namespaced_signatures_remain_readable_and_noop_conversion_preserves_bytes() {
+    for format in [10108, 10109] {
+        let xml = project("\n<Signature xmlns:a=\"urn:audit\" a:ReturnType=\"KEEP\">\n <a:Returns/>\n</Signature>\n")
+            .replace("10109", &format.to_string());
+        assert_eq!(convert_format(&xml, format).unwrap(), xml);
+        let f = Fixture::new(&xml);
+        for args in [
+            vec!["format"],
+            vec![
+                "format",
+                "--target",
+                if format == 10108 { "10108" } else { "10109" },
+            ],
+        ] {
+            let output = f.run(&args);
+            assert!(output.status.success(), "{output:?}");
+            f.unchanged(&xml);
+        }
+    }
+}
+
+#[test]
+fn later_signature_newline_error_preserves_the_entire_file() {
+    for (from, to, return_type, body) in [
+        (
+            10108,
+            10109,
+            " ReturnType=\"f32\"",
+            " <Params/>\n <ReturnDescription>\n<![CDATA[payload]]>\n </ReturnDescription>",
+        ),
+        (
+            10109,
+            10108,
+            "",
+            " <Returns>\n  <Return Type=\"f32\">\n   <Description>\n<![CDATA[payload]]>\n   </Description>\n  </Return>\n </Returns>",
+        ),
+    ] {
+        let signature = format!("<Signature Name=\"\"{return_type}>\n{body}\n</Signature>");
+        let good = signature.replace('\n', "\r\n");
+        let mixed = good.replace("\r\n</Signature>", "\n</Signature>");
+        let xml = project(&format!("{good}{mixed}"))
+            .replace("FileFormat=\"10109\"", &format!("FileFormat=\"{from}\""));
+        let fixture = Fixture::new(&xml);
+        let output = fixture.run(&["format", "--target", &to.to_string()]);
+        assert!(!output.status.success(), "from={from}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("newline"));
+        fixture.unchanged(&xml);
+    }
+}

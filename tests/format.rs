@@ -359,3 +359,61 @@ fn corpus_round_trip_is_byte_identical() {
         "10109 -> 10108 -> 10109 not byte-identical on the real project"
     );
 }
+
+#[test]
+fn crlf_signatures_convert_and_round_trip_byte_exactly() {
+    for (old, new) in [
+        (shapes::typed_10108(), shapes::typed_10109()),
+        (shapes::void_empty_10108(), shapes::void_empty_10109()),
+        (shapes::void_params_10108(), shapes::void_params_10109()),
+        (shapes::payload_10108(), shapes::payload_10109()),
+    ] {
+        assert_pair(&old.replace('\n', "\r\n"), &new.replace('\n', "\r\n"));
+    }
+}
+
+#[test]
+fn conversion_keeps_multiline_cdata_bytes_and_each_signatures_newlines() {
+    let payload = "first\r\nsecond\nthird\rfourth <![CDATA[literal marker";
+    let old = shapes::payload_10108().replace("true when armed", payload);
+    let new = shapes::payload_10109().replace("true when armed", payload);
+    assert_pair(&old, &new);
+    // Different signatures can have different structural newlines in one project.
+    assert_pair(
+        &format!("{}{}", shapes::typed_10108().replace('\n', "\r\n"), old),
+        &format!("{}{}", shapes::typed_10109().replace('\n', "\r\n"), new),
+    );
+}
+
+#[test]
+fn typed_return_with_params_keeps_params_and_round_trips() {
+    let params =
+        "<Params>\n       <Param Name=\"Timeout\" Type=\"f32\" Attrs=\"0\"/>\n      </Params>";
+    let old = shapes::typed_10108().replace("<Params/>", params);
+    let new = shapes::typed_10109().replace(
+        "     <Signature Name=\"\">\n",
+        &format!("     <Signature Name=\"\">\n      {params}\n"),
+    );
+    assert_pair(&old, &new);
+    assert_pair(&old.replace('\n', "\r\n"), &new.replace('\n', "\r\n"));
+}
+
+#[test]
+fn mixed_structural_newlines_refuse_conversion() {
+    for (from, to, signature) in [
+        (10108, 10109, shapes::typed_10108()),
+        (10109, 10108, shapes::typed_10109()),
+    ] {
+        for (normal, different) in [("\n", "\r\n"), ("\r\n", "\n")] {
+            let uniform = signature.replace('\n', normal);
+            let boundary = format!("{normal}     </Signature>");
+            let mixed = uniform.replace(&boundary, &format!("{different}     </Signature>"));
+            assert_ne!(uniform, mixed);
+            // Earlier valid edits must not be published if a later signature fails.
+            let body = format!("{uniform}{mixed}");
+            let original = wrap(from, "1.4.0.0108", &body);
+            let error = convert_format(&original, to).unwrap_err();
+            assert!(error.to_string().contains("newline"), "{error}");
+        }
+    }
+}
